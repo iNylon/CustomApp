@@ -1,0 +1,190 @@
+services:
+  php-storefront:
+    build:
+      context: ./php-app
+    container_name: php-storefront
+    ports:
+      - "8080:8080"
+    environment:
+      APP_ENV: poc
+      APP_SERVICE_NAME: php-storefront
+      APP_PORT: "8080"
+      APP_LOG_FILE: /var/telemetry-logs/php-storefront.log
+      APP_ENABLE_RUM: "false"
+      APP_RUM_CLIENT_TOKEN: rumsc8iFvkD9574Idx7
+      APP_RUM_APPLICATION_ID: web-application-id
+      APP_RUM_SITE: openobserve.dylanp.nl
+      APP_RUM_ORGANIZATION_IDENTIFIER: 3BTUvLGWaJI6cc5tC2JGlZTW1ea
+      APP_RUM_SERVICE: php-storefront-web
+      APP_RUM_ENV: poc
+      APP_RUM_VERSION: 0.0.1
+      APP_RUM_API_VERSION: v1
+      APP_RUM_INSECURE_HTTP: "false"
+      MYSQL_DSN: mysql:host=mysql;port=3306;dbname=catalog
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+      POSTGRES_DSN: pgsql:host=postgres;port=5432;dbname=recommendations
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      NODE_SERVICE_URL: http://node-catalog:3000
+      PYTHON_SERVICE_URL: http://python-recommendation:8000
+      JAVA_SERVICE_URL: http://java-checkout:8081
+      OTEL_EXPORTER_OTLP_HTTP_ENDPOINT: http://otel-collector:4318
+      OTEL_RESOURCE_ATTRIBUTES: service.name=php-storefront,service.namespace=openobserve-poc,deployment.environment=poc
+    depends_on:
+      - mysql
+      - postgres
+      - redis
+      - node-catalog
+      - python-recommendation
+      - java-checkout
+      - otel-collector
+    volumes:
+      - telemetry-logs:/var/telemetry-logs
+
+  python-recommendation:
+    build:
+      context: ./python-service
+    container_name: python-recommendation
+    environment:
+      APP_SERVICE_NAME: python-recommendation
+      APP_PORT: "8000"
+      APP_LOG_FILE: /var/telemetry-logs/python-recommendation.log
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: recommendations
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_SERVICE_NAME: python-recommendation
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc
+    depends_on:
+      - postgres
+      - redis
+      - otel-collector
+    volumes:
+      - telemetry-logs:/var/telemetry-logs
+
+  node-catalog:
+    build:
+      context: ./node-service
+    container_name: node-catalog
+    environment:
+      APP_SERVICE_NAME: node-catalog
+      APP_PORT: "3000"
+      APP_LOG_FILE: /var/telemetry-logs/node-catalog.log
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: catalog
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_SERVICE_NAME: node-catalog
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc
+    depends_on:
+      - mysql
+      - redis
+      - otel-collector
+    volumes:
+      - telemetry-logs:/var/telemetry-logs
+
+  java-checkout:
+    build:
+      context: ./java-service
+    container_name: java-checkout
+    environment:
+      APP_SERVICE_NAME: java-checkout
+      APP_PORT: "8081"
+      APP_LOG_FILE: /var/telemetry-logs/java-checkout.log
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: java-checkout
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc
+    depends_on:
+      - redis
+      - otel-collector
+    volumes:
+      - telemetry-logs:/var/telemetry-logs
+
+  mysql:
+    image: mysql:8.4
+    container_name: poc-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: catalog
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  postgres:
+    image: postgres:16
+    container_name: poc-postgres
+    environment:
+      POSTGRES_DB: recommendations
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  redis:
+    image: redis:7
+    container_name: poc-redis
+    ports:
+      - "6379:6379"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.101.0
+    container_name: poc-otel-collector
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - telemetry-logs:/var/telemetry-logs:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
+    depends_on:
+      - mysql
+      - postgres
+      - redis
+
+  load-generator:
+    build:
+      context: ./loadgen
+    container_name: poc-load-generator
+    environment:
+      TARGET_HOST: http://php-storefront:8080
+    ports:
+      - "8089:8089"
+    command:
+      - locust
+      - -f
+      - /app/locustfile.py
+      - --host
+      - http://php-storefront:8080
+      - --web-host
+      - 0.0.0.0
+    depends_on:
+      - php-storefront
+
+volumes:
+  mysql-data:
+  postgres-data:
+  telemetry-logs:
