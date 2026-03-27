@@ -154,15 +154,14 @@ public final class App {
     SpanContext spanContext = Span.current().getSpanContext();
     String traceId = spanContext.isValid() ? spanContext.getTraceId() : "";
     String spanId = spanContext.isValid() ? spanContext.getSpanId() : "";
-    String tracePart = traceId.isEmpty() ? "" : String.format(",\"trace_id\":\"%s\",\"span_id\":\"%s\"", traceId, spanId);
-
     String entry = String.format(
-      "{\"timestamp\":\"%s\",\"severity\":\"%s\",\"service.name\":\"%s\",\"message\":\"%s\"%s,\"context\":%s}%n",
+      "{\"timestamp\":\"%s\",\"severity\":\"%s\",\"service.name\":\"%s\",\"message\":\"%s\",\"trace_id\":\"%s\",\"span_id\":\"%s\",\"context\":%s}%n",
         Instant.now(),
         severity,
         SERVICE_NAME,
         message.replace("\"", "'"),
-      tracePart,
+        traceId,
+        spanId,
         mapToJson(context));
     java.nio.file.Files.writeString(
         java.nio.file.Path.of(LOG_FILE),

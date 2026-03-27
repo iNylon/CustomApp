@@ -96,15 +96,10 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
     if ($path === '/api/summary' || $path === '/api/checkout') {
       $payload = buildSummary($path, $logger, $emitter, $rootSpan);
 
-        if ($path === '/api/checkout' && random_int(1, 100) <= 18) {
-            $logger->error('Checkout chaos triggered', ['route' => $path]);
-            throw new RuntimeException('Synthetic checkout failure for observability demo');
-        }
-
         header('Content-Type: application/json');
         echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
 
-        $status = $payload['degraded'] ? 206 : 200;
+      $status = $path === '/api/checkout' ? 200 : ($payload['degraded'] ? 206 : 200);
         finalize($path, $status, $requestStart, $logger, $emitter, $rootSpan, 'Served business payload', [
             'cart_size' => count($payload['catalog']['items'] ?? []),
             'degraded' => $payload['degraded'],
@@ -154,6 +149,15 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
         'component_errors' => $componentErrors,
     ]);
 
+      $order = null;
+      if ($route === '/api/checkout') {
+        $order = [
+          'order_id' => strtoupper(bin2hex(random_bytes(6))),
+          'status' => $componentErrors > 0 ? 'confirmed_with_warnings' : 'confirmed',
+          'estimated_shipping_days' => random_int(1, 4),
+        ];
+      }
+
     return [
         'service' => 'php-storefront',
         'route' => $route,
@@ -168,6 +172,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
         'catalog' => $catalogProbe['data'],
         'recommendations' => $recommendationsProbe['data'],
         'checkout' => $checkoutProbe['data'],
+        'order' => $order,
     ];
 }
 

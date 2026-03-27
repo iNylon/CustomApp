@@ -68,8 +68,8 @@ function log(severity, message, context = {}) {
     severity,
     'service.name': serviceName,
     message,
-    trace_id: spanContext ? spanContext.traceId : undefined,
-    span_id: spanContext ? spanContext.spanId : undefined,
+    trace_id: spanContext ? spanContext.traceId : '',
+    span_id: spanContext ? spanContext.spanId : '',
     context,
   });
   fs.appendFileSync(logFile, entry + '\n');

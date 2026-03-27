@@ -50,12 +50,8 @@ final class AppLogger
             'context' => $context,
         ];
 
-        if ($traceId !== '') {
-            $entry['trace_id'] = $traceId;
-        }
-        if ($spanId !== '') {
-            $entry['span_id'] = $spanId;
-        }
+        $entry['trace_id'] = $traceId;
+        $entry['span_id'] = $spanId;
 
         $line = json_encode($entry, JSON_UNESCAPED_SLASHES) . PHP_EOL;
         @file_put_contents($this->logFile, $line, FILE_APPEND);
