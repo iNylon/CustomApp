@@ -35,6 +35,7 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: service.name=php-storefront,service.namespace=openobserve-poc,deployment.environment=poc
       APP_DB_BOTTLENECK_MODE: "true"
       APP_DB_BOTTLENECK_LOOPS: "12"
+      APP_REDIS_BOTTLENECK_LOOPS: "30"
     depends_on:
       - mysql
       - postgres

@@ -145,41 +145,60 @@ function buildSummary(string $route, AppLogger $logger): array
 
 function queryMysql(): array
 {
+    $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+    if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
+        $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = true;
+    }
+
     $pdo = new PDO(
         getenv('MYSQL_DSN') ?: 'mysql:host=mysql;port=3306;dbname=catalog',
         getenv('MYSQL_USER') ?: 'app',
         getenv('MYSQL_PASSWORD') ?: 'app',
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+        $options
     );
-      $wasteQueries = 0;
 
-      if (isDbBottleneckModeEnabled()) {
+    $wasteQueries = 0;
+
+    if (isDbBottleneckModeEnabled()) {
         try {
-          $pdo->beginTransaction();
-          $pdo->exec('SELECT id FROM products WHERE id = 1 FOR UPDATE');
-          $pdo->exec('SELECT SLEEP(0.12)');
-          $wasteQueries += 2;
+            $pdo->beginTransaction();
 
-          $categories = ['apparel', 'accessories', 'stationery'];
-          for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
-            $category = $categories[$i % count($categories)];
-            $stmt = $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = :category');
-            $stmt->execute(['category' => $category]);
-            $stmt->fetchColumn();
+            $stmt = $pdo->query('SELECT id FROM products WHERE id = 1 FOR UPDATE');
+            $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $stmt->closeCursor();
             $wasteQueries++;
-          }
 
-          $row = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products')->fetch(PDO::FETCH_ASSOC);
-          $pdo->commit();
+            $stmt = $pdo->query('SELECT SLEEP(0.12) AS waited');
+            $stmt->fetchColumn();
+            $stmt->closeCursor();
+            $wasteQueries++;
+
+            $categories = ['apparel', 'accessories', 'stationery'];
+            for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
+                $category = $categories[$i % count($categories)];
+                $stmt = $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = :category');
+                $stmt->execute(['category' => $category]);
+                $stmt->fetchColumn();
+                $stmt->closeCursor();
+                $wasteQueries++;
+            }
+
+            $stmt = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products');
+            $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $stmt->closeCursor();
+
+            $pdo->commit();
         } catch (Throwable $e) {
-          if ($pdo->inTransaction()) {
-            $pdo->rollBack();
-          }
-          throw $e;
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $e;
         }
-      } else {
-        $row = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products')->fetch(PDO::FETCH_ASSOC);
-      }
+    } else {
+        $stmt = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products');
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $stmt->closeCursor();
+    }
 
     return [
         'product_count' => (int) ($row['product_count'] ?? 0),
@@ -196,34 +215,48 @@ function queryPostgres(): array
         getenv('POSTGRES_PASSWORD') ?: 'app',
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
     );
-      $wasteQueries = 0;
 
-      if (isDbBottleneckModeEnabled()) {
+    $wasteQueries = 0;
+
+    if (isDbBottleneckModeEnabled()) {
         try {
-          $pdo->beginTransaction();
-          $pdo->exec('SELECT id FROM users WHERE id = 1 FOR UPDATE');
-          $pdo->exec('SELECT pg_sleep(0.15)');
-          $wasteQueries += 2;
+            $pdo->beginTransaction();
 
-          for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
-            $userId = ($i % 3) + 1;
-            $stmt = $pdo->prepare('SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id');
-            $stmt->execute(['user_id' => $userId]);
-            $stmt->fetchColumn();
+            $stmt = $pdo->query('SELECT id FROM users WHERE id = 1 FOR UPDATE');
+            $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $stmt->closeCursor();
             $wasteQueries++;
-          }
 
-          $row = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations')->fetch(PDO::FETCH_ASSOC);
-          $pdo->commit();
+            $stmt = $pdo->query('SELECT pg_sleep(0.15)');
+            $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $stmt->closeCursor();
+            $wasteQueries++;
+
+            for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
+                $userId = ($i % 3) + 1;
+                $stmt = $pdo->prepare('SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id');
+                $stmt->execute(['user_id' => $userId]);
+                $stmt->fetchColumn();
+                $stmt->closeCursor();
+                $wasteQueries++;
+            }
+
+            $stmt = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations');
+            $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $stmt->closeCursor();
+
+            $pdo->commit();
         } catch (Throwable $e) {
-          if ($pdo->inTransaction()) {
-            $pdo->rollBack();
-          }
-          throw $e;
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $e;
         }
-      } else {
-        $row = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations')->fetch(PDO::FETCH_ASSOC);
-      }
+    } else {
+        $stmt = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations');
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $stmt->closeCursor();
+    }
 
     return [
         'recommendation_count' => (int) ($row['recommendation_count'] ?? 0),
@@ -231,32 +264,62 @@ function queryPostgres(): array
     ];
 }
 
-    function isDbBottleneckModeEnabled(): bool
-    {
-      $value = getenv('APP_DB_BOTTLENECK_MODE');
-      if ($value === false) {
+function isDbBottleneckModeEnabled(): bool
+{
+    $value = getenv('APP_DB_BOTTLENECK_MODE');
+    if ($value === false) {
         return true;
-      }
-
-      return strtolower((string) $value) !== 'false';
     }
 
-    function getDbBottleneckLoops(): int
-    {
-      $value = (int) (getenv('APP_DB_BOTTLENECK_LOOPS') ?: 8);
+    return strtolower((string) $value) !== 'false';
+}
 
-      return max(1, min($value, 50));
-    }
+function getDbBottleneckLoops(): int
+{
+    $value = (int) (getenv('APP_DB_BOTTLENECK_LOOPS') ?: 8);
+
+    return max(1, min($value, 50));
+}
 
 function queryRedis(): array
 {
     $redis = new Redis();
     $redis->connect(getenv('REDIS_HOST') ?: 'redis', (int) (getenv('REDIS_PORT') ?: 6379), 1.5);
+
+    $loops = max(1, min((int) (getenv('APP_REDIS_BOTTLENECK_LOOPS') ?: 20), 200));
+    $wasteOps = 0;
+    $retryConflicts = 0;
+
     $redis->set('php:last_seen', gmdate('c'));
+    $hotKey = 'redis:hotspot:counter';
+
+    if (isDbBottleneckModeEnabled()) {
+        for ($i = 0; $i < $loops; $i++) {
+            $redis->watch($hotKey);
+            $current = (int) ($redis->get($hotKey) ?: 0);
+            usleep(40000);
+
+            $redis->multi();
+            $redis->set($hotKey, (string) ($current + 1));
+            $redis->expire($hotKey, 120);
+            $tx = $redis->exec();
+
+            if ($tx === false) {
+                $retryConflicts++;
+                continue;
+            }
+
+            $redis->get($hotKey);
+            $redis->pttl($hotKey);
+            $wasteOps += 4;
+        }
+    }
 
     return [
         'redis_ping' => $redis->ping(),
         'php_last_seen' => (string) $redis->get('php:last_seen'),
+        'redis_waste_ops' => $wasteOps,
+        'redis_tx_conflicts' => $retryConflicts,
     ];
 }
 
@@ -359,13 +422,20 @@ function renderIndex(): string
       font-size: 1rem;
       font-weight: 700;
     }
-    .primary { background: var(--accent); color: white; }
+        $wasteQueries = 0;
+
     .secondary { background: var(--accent-2); color: white; }
     .danger { background: #962c2c; color: white; }
     pre {
-      margin-top: 24px;
-      padding: 20px;
-      border-radius: 18px;
+            $stmt = $pdo->query('SELECT id FROM users WHERE id = 1 FOR UPDATE');
+            $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $stmt->closeCursor();
+            $wasteQueries++;
+
+            $stmt = $pdo->query('SELECT pg_sleep(0.15)');
+            $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $stmt->closeCursor();
+            $wasteQueries++;
       background: #11161b;
       color: #f7fafc;
       overflow: auto;
@@ -433,12 +503,41 @@ function finalize(string $path, int $status, float $requestStart, AppLogger $log
     ]);
 
     $emitter->exportTrace($emitter->finishSpan($emitter->startSpan('php.finalize', ['http.route' => $path]), array_merge([
+
+      $loops = max(1, min((int) (getenv('APP_REDIS_BOTTLENECK_LOOPS') ?: 20), 200));
+      $wasteOps = 0;
+      $retryConflicts = 0;
         'http.status_code' => $status,
         'http.route' => $path,
+      $hotKey = 'redis:hotspot:counter';
+
+      if (isDbBottleneckModeEnabled()) {
+        for ($i = 0; $i < $loops; $i++) {
+          $redis->watch($hotKey);
+          $current = (int) ($redis->get($hotKey) ?: 0);
+          usleep(40000);
+
+          $redis->multi();
+          $redis->set($hotKey, (string) ($current + 1));
+          $redis->expire($hotKey, 120);
+          $tx = $redis->exec();
+
+          if ($tx === false) {
+            $retryConflicts++;
+            continue;
+          }
+
+          $redis->get($hotKey);
+          $redis->pttl($hotKey);
+          $wasteOps += 4;
+        }
+      }
         'http.method' => $_SERVER['REQUEST_METHOD'] ?? 'GET',
         'duration_ms' => $latency,
     ], $extraAttributes), $status >= 500));
     $emitter->exportMetrics([
+        'redis_waste_ops' => $wasteOps,
+        'redis_tx_conflicts' => $retryConflicts,
         $emitter->counter('php_requests_total', 1, ['route' => $path, 'status' => $status]),
         $emitter->histogram('php_request_duration_ms', $latency, ['route' => $path, 'status' => $status]),
     ]);
