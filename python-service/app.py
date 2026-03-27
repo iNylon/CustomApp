@@ -2,6 +2,7 @@ import json
 import os
 import random
 import time
+import uuid
 from datetime import datetime, timezone
 
 import psycopg2
@@ -53,8 +54,8 @@ app = Flask(__name__)
 
 def log(severity: str, message: str, **context):
     span_context = trace.get_current_span().get_span_context()
-    trace_id = f"{span_context.trace_id:032x}" if span_context and span_context.is_valid else None
-    span_id = f"{span_context.span_id:016x}" if span_context and span_context.is_valid else None
+    trace_id = f"{span_context.trace_id:032x}" if span_context and span_context.is_valid else ""
+    span_id = f"{span_context.span_id:016x}" if span_context and span_context.is_valid else ""
 
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
@@ -94,6 +95,7 @@ def before_request():
     request._start_time = time.perf_counter()
     extracted = propagate.extract(dict(request.headers))
     request._otel_token = otel_context.attach(extracted)
+    request._request_id = request.headers.get("x-request-id") or f"req-{uuid.uuid4().hex[:16]}"
 
 
 @app.after_request
@@ -102,7 +104,8 @@ def after_request(response):
     attrs = {"route": request.path, "status": response.status_code}
     request_counter.add(1, attrs)
     latency_histogram.record(duration, attrs)
-    log("INFO", "python request complete", path=request.path, status=response.status_code, duration_ms=round(duration, 2))
+    response.headers["x-request-id"] = request._request_id
+    log("INFO", "python request complete", path=request.path, status=response.status_code, duration_ms=round(duration, 2), request_id=request._request_id)
     token = getattr(request, "_otel_token", None)
     if token is not None:
         otel_context.detach(token)
@@ -118,12 +121,15 @@ def healthz():
 def recommendations():
     user_id = int(request.args.get("user_id", "1"))
     with tracer.start_as_current_span("python.recommendations", kind=SpanKind.SERVER, attributes={"user.id": user_id, "http.route": "/recommendations", "http.method": "GET"}):
+        span = trace.get_current_span()
+        span.set_attribute("request.id", request._request_id)
         cache = get_redis()
         cache_key = f"recommendations:{user_id}"
         cached = cache.get(cache_key)
         if cached and not DB_BOTTLENECK_MODE:
             payload = json.loads(cached)
-            log("INFO", "served recommendations from cache", user_id=user_id)
+            payload["request_id"] = request._request_id
+            log("INFO", "served recommendations from cache", user_id=user_id, request_id=request._request_id)
             return jsonify(payload)
 
         with get_pg_connection() as conn, conn.cursor() as cur:
@@ -165,6 +171,7 @@ def recommendations():
 
         payload = {
             "service": SERVICE_NAME,
+            "request_id": request._request_id,
             "user_id": user_id,
             "items": items,
             "cache": False,
@@ -174,10 +181,10 @@ def recommendations():
 
         if random.randint(1, 100) <= 12:
             error_counter.add(1, {"route": request.path})
-            log("ERROR", "synthetic python recommendation error", user_id=user_id)
-            return jsonify({"error": "synthetic recommendation failure", "service": SERVICE_NAME}), 503
+            log("ERROR", "synthetic python recommendation error", user_id=user_id, request_id=request._request_id)
+            return jsonify({"error": "synthetic recommendation failure", "service": SERVICE_NAME, "request_id": request._request_id}), 503
 
-        log("INFO", "served recommendations from postgres", user_id=user_id, count=len(payload["items"]))
+        log("INFO", "served recommendations from postgres", user_id=user_id, count=len(payload["items"]), request_id=request._request_id)
         return jsonify(payload)
 
 

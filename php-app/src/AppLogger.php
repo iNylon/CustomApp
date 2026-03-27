@@ -5,6 +5,7 @@ declare(strict_types=1);
 final class AppLogger
 {
     private array $traceContext = [];
+    private string $requestId = '';
 
     public function __construct(
         private readonly string $serviceName,
@@ -18,6 +19,11 @@ final class AppLogger
             'trace_id' => $traceId,
             'span_id' => $spanId,
         ];
+    }
+
+    public function setRequestId(string $requestId): void
+    {
+        $this->requestId = $requestId;
     }
 
     public function info(string $message, array $context = []): void
@@ -34,12 +40,16 @@ final class AppLogger
     {
         $traceId = (string) ($context['trace_id'] ?? $this->traceContext['trace_id'] ?? '');
         $spanId = (string) ($context['span_id'] ?? $this->traceContext['span_id'] ?? '');
+        $requestId = (string) ($context['request_id'] ?? $this->requestId);
 
         if ($traceId !== '' && !isset($context['trace_id'])) {
             $context['trace_id'] = $traceId;
         }
         if ($spanId !== '' && !isset($context['span_id'])) {
             $context['span_id'] = $spanId;
+        }
+        if ($requestId !== '' && !isset($context['request_id'])) {
+            $context['request_id'] = $requestId;
         }
 
         $entry = [
@@ -52,6 +62,7 @@ final class AppLogger
 
         $entry['trace_id'] = $traceId;
         $entry['span_id'] = $spanId;
+        $entry['request_id'] = $requestId;
 
         $line = json_encode($entry, JSON_UNESCAPED_SLASHES) . PHP_EOL;
         @file_put_contents($this->logFile, $line, FILE_APPEND);

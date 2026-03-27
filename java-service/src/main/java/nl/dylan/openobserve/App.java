@@ -34,6 +34,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import redis.clients.jedis.Jedis;
 
@@ -103,15 +104,20 @@ public final class App {
     server.setExecutor(Executors.newFixedThreadPool(8));
 
     server.createContext("/healthz", exchange -> {
+      String requestId = getRequestId(exchange);
+      exchange.getResponseHeaders().set("x-request-id", requestId);
       requestCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/healthz"));
-      writeJson(exchange, 200, "{\"ok\":true,\"service\":\"" + SERVICE_NAME + "\"}");
+      writeJson(exchange, 200, "{\"ok\":true,\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\"}");
     });
 
     server.createContext("/quote", exchange -> {
+      String requestId = getRequestId(exchange);
+      exchange.getResponseHeaders().set("x-request-id", requestId);
       long start = System.nanoTime();
       Context parentContext = W3CTraceContextPropagator.getInstance().extract(Context.root(), exchange.getRequestHeaders(), HEADER_GETTER);
       Span span = tracer.spanBuilder("java.quote").setParent(parentContext).setSpanKind(SpanKind.SERVER).startSpan();
       try (Scope scope = span.makeCurrent(); Jedis jedis = new Jedis(REDIS_HOST, REDIS_PORT)) {
+        span.setAttribute("request.id", requestId);
         jedis.set("java:last_quote", Instant.now().toString());
         double quote = 29.99 + RANDOM.nextInt(60);
         boolean failure = RANDOM.nextInt(100) < Math.max(0, Math.min(FAILURE_RATE_PERCENT, 100));
@@ -122,15 +128,15 @@ public final class App {
           throw new RuntimeException("synthetic java checkout failure");
         }
 
-        String body = "{\"service\":\"" + SERVICE_NAME + "\",\"quote\":" + quote + ",\"redis_marker\":\"" + jedis.get("java:last_quote") + "\"}";
+        String body = "{\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\",\"quote\":" + quote + ",\"redis_marker\":\"" + jedis.get("java:last_quote") + "\"}";
         writeJson(exchange, 200, body);
-        log("INFO", "java quote served", Map.of("quote", quote));
+        log("INFO", "java quote served", Map.of("quote", quote, "request_id", requestId));
       } catch (Exception error) {
         span.recordException(error);
         span.setStatus(StatusCode.ERROR, error.getMessage());
         errorCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
-        log("ERROR", "java quote failed", Map.of("error", error.getMessage()));
-        writeJson(exchange, 503, "{\"error\":\"" + error.getMessage() + "\",\"service\":\"" + SERVICE_NAME + "\"}");
+        log("ERROR", "java quote failed", Map.of("error", error.getMessage(), "request_id", requestId));
+        writeJson(exchange, 503, "{\"error\":\"" + error.getMessage() + "\",\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\"}");
       } finally {
         latencyHistogram.record((System.nanoTime() - start) / 1_000_000.0, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
         span.end();
@@ -139,6 +145,14 @@ public final class App {
 
     log("INFO", "starting java checkout service", Map.of("port", PORT, "otlp", OTLP_ENDPOINT));
     server.start();
+  }
+
+  private static String getRequestId(HttpExchange exchange) {
+    String headerValue = exchange.getRequestHeaders().getFirst("x-request-id");
+    if (headerValue != null && !headerValue.isBlank()) {
+      return headerValue;
+    }
+    return "req-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
   }
 
   private static void writeJson(HttpExchange exchange, int statusCode, String body) throws IOException {

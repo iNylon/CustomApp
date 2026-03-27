@@ -65,3 +65,41 @@ APP_RUM_INSECURE_HTTP: "false"
 ```
 
 De frontend exposeert deze waarden via `/rum-config.js`, zodat je later eenvoudig de OpenObserve browser SDK kunt toevoegen.
+
+## O2 verificatie (trace, logs, infra)
+
+Na deployment van de laatste wijzigingen kun je in OpenObserve snel verifiëren:
+
+1. `trace_id` en `request_id` aanwezig in logs.
+2. Correlatie van trace naar logs.
+3. Infrastructuurcomponenten zichtbaar in traces via `component.layer` en `infra.kind`.
+
+Voorbeeld queries:
+
+```sql
+SELECT _timestamp, "service.name", trace_id, request_id, message
+FROM "poc-logs"
+WHERE _timestamp >= now() - INTERVAL '30 minutes'
+ORDER BY _timestamp DESC
+LIMIT 200;
+```
+
+```sql
+SELECT _timestamp, trace_id, service_name, span_name, status_code, duration_ms, attributes
+FROM "poc-traces"
+WHERE _timestamp >= now() - INTERVAL '30 minutes'
+	AND (
+		attributes.component.layer = 'infrastructure'
+		OR attributes.infra.kind IS NOT NULL
+	)
+ORDER BY _timestamp DESC
+LIMIT 300;
+```
+
+```sql
+SELECT _timestamp, "service.name", severity, message, trace_id, request_id, context
+FROM "poc-logs"
+WHERE _timestamp >= now() - INTERVAL '30 minutes'
+	AND trace_id = '<trace_id_uit_traces>'
+ORDER BY _timestamp DESC;
+```

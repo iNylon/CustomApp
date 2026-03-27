@@ -60,6 +60,10 @@ redis.connect().catch((error) => {
 
 const app = express();
 
+function generateRequestId() {
+  return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function log(severity, message, context = {}) {
   const activeSpan = trace.getActiveSpan();
   const spanContext = activeSpan ? activeSpan.spanContext() : undefined;
@@ -77,13 +81,16 @@ function log(severity, message, context = {}) {
 }
 
 app.use((req, res, next) => {
+  req.requestId = req.get('x-request-id') || generateRequestId();
+  res.setHeader('x-request-id', req.requestId);
+
   const start = performance.now();
   res.on('finish', () => {
     const duration = performance.now() - start;
     const attrs = { route: req.path, status: res.statusCode };
     requestCounter.add(1, attrs);
     latencyHistogram.record(duration, attrs);
-    log('INFO', 'node request complete', { path: req.path, status: res.statusCode, duration_ms: Number(duration.toFixed(2)) });
+    log('INFO', 'node request complete', { path: req.path, status: res.statusCode, duration_ms: Number(duration.toFixed(2)), request_id: req.requestId });
   });
   next();
 });
@@ -92,9 +99,10 @@ app.get('/healthz', (_req, res) => {
   res.json({ ok: true, service: serviceName });
 });
 
-app.get('/inventory', async (_req, res) => {
+app.get('/inventory', async (req, res) => {
   return tracer.startActiveSpan('node.inventory', async (span) => {
     try {
+      span.setAttribute('request.id', req.requestId);
       const [rows] = await mysqlPool.query('SELECT sku, name, category, price, inventory FROM products ORDER BY id LIMIT 25');
       const wasteQueryCount = dbBottleneckMode ? await induceMysqlBottleneck(rows) : 0;
       await redis.set('node:last_inventory_fetch', new Date().toISOString());
@@ -106,6 +114,7 @@ app.get('/inventory', async (_req, res) => {
 
       res.json({
         service: serviceName,
+        request_id: req.requestId,
         items: rows,
         waste_queries: wasteQueryCount,
         redis_marker: await redis.get('node:last_inventory_fetch'),
@@ -117,8 +126,8 @@ app.get('/inventory', async (_req, res) => {
       errorCounter.add(1, { route: '/inventory' });
       span.recordException(error);
       span.setStatus({ code: 2, message: error.message });
-      log('ERROR', 'node inventory failed', { error: error.message });
-      res.status(503).json({ error: error.message, service: serviceName });
+      log('ERROR', 'node inventory failed', { error: error.message, request_id: req.requestId });
+      res.status(503).json({ error: error.message, service: serviceName, request_id: req.requestId });
       span.end();
     }
   });
