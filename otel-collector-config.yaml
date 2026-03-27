@@ -7,7 +7,7 @@ receivers:
   filelog:
     include:
       - /var/telemetry-logs/*.log
-    start_at: beginning
+    start_at: end
     include_file_path: true
     operators:
       - type: json_parser

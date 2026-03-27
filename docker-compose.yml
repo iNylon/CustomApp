@@ -113,6 +113,7 @@ services:
       APP_LOG_FILE: /var/telemetry-logs/java-checkout.log
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      APP_SYNTHETIC_FAILURE_RATE_PERCENT: "8"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: java-checkout
       OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc

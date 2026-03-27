@@ -37,6 +37,7 @@ public final class App {
   private static final String REDIS_HOST = System.getenv().getOrDefault("REDIS_HOST", "redis");
   private static final int REDIS_PORT = Integer.parseInt(System.getenv().getOrDefault("REDIS_PORT", "6379"));
   private static final int PORT = Integer.parseInt(System.getenv().getOrDefault("APP_PORT", "8081"));
+  private static final int FAILURE_RATE_PERCENT = Integer.parseInt(System.getenv().getOrDefault("APP_SYNTHETIC_FAILURE_RATE_PERCENT", "8"));
   private static final Random RANDOM = new Random();
 
   private App() {
@@ -87,7 +88,7 @@ public final class App {
       try (Jedis jedis = new Jedis(REDIS_HOST, REDIS_PORT)) {
         jedis.set("java:last_quote", Instant.now().toString());
         double quote = 29.99 + RANDOM.nextInt(60);
-        boolean failure = RANDOM.nextInt(100) < 14;
+        boolean failure = RANDOM.nextInt(100) < Math.max(0, Math.min(FAILURE_RATE_PERCENT, 100));
 
         requestCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
         if (failure) {
