@@ -10,7 +10,7 @@ services:
       APP_SERVICE_NAME: php-storefront
       APP_PORT: "8080"
       APP_LOG_FILE: /var/telemetry-logs/php-storefront.log
-      APP_ENABLE_RUM: "false"
+      APP_ENABLE_RUM: "true"
       APP_RUM_CLIENT_TOKEN: rumsc8iFvkD9574Idx7
       APP_RUM_APPLICATION_ID: web-application-id
       APP_RUM_SITE: openobserve.dylanp.nl

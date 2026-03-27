@@ -1,0 +1,15 @@
+{
+  "name": "php-storefront-frontend",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "build": "esbuild frontend/main.js --bundle --format=iife --platform=browser --target=es2020 --outfile=public/assets/app.js"
+  },
+  "dependencies": {
+    "@openobserve/browser-logs": "^0.1.6",
+    "@openobserve/browser-rum": "^0.1.6"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.2"
+  }
+}

@@ -222,6 +222,7 @@ function renderIndex(): string
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OpenObserve OTEL PoC</title>
   <script src="/rum-config.js"></script>
+  <script src="/assets/app.js" defer></script>
   <style>
     :root {
       --bg: #f5efe6;
