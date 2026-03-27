@@ -32,19 +32,25 @@ $logger->setRequestId($requestId);
 try {
     route($path, $method, $logger, $emitter, $requestStart, $rootSpan);
 } catch (Throwable $e) {
+  $errorContext = describeThrowable($e);
+
     http_response_code(500);
     header('Content-Type: application/json');
 
     $logger->error('Unhandled PHP exception', [
         'exception' => $e->getMessage(),
         'path' => $path,
+    'exception_type' => (string) ($errorContext['error.type'] ?? ''),
+    'exception_function' => (string) ($errorContext['error.function'] ?? ''),
+    'exception_file' => (string) ($errorContext['error.file'] ?? ''),
+    'exception_line' => (int) ($errorContext['error.line'] ?? 0),
     ]);
 
-    $emitter->exportTrace($emitter->finishSpan($rootSpan, [
+  $emitter->exportTrace($emitter->finishSpan($rootSpan, array_merge([
         'http.status_code' => 500,
         'http.route' => $path,
         'error' => true,
-    ], true, $e->getMessage()));
+  ], $errorContext), true, $e->getMessage()));
 
     $emitter->exportMetrics([
         $emitter->counter('php_requests_total', 1, ['route' => $path, 'status' => 500]),
@@ -98,7 +104,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
     }
 
     if ($path === '/api/error') {
-        throw new RuntimeException('Intentional PHP error path triggered');
+      triggerIntentionalErrorPath();
     }
 
     if ($path === '/api/summary' || $path === '/api/checkout') {
@@ -252,13 +258,14 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
         return ['ok' => true, 'data' => $data];
     } catch (Throwable $error) {
         $message = $error->getMessage();
+      $errorContext = describeThrowable($error);
 
         $emitter->exportTrace($emitter->finishSpan($span, array_merge([
             'component.name' => $name,
             'component.ok' => false,
             'duration_ms' => elapsedMs($start),
             'error' => true,
-        ], $extraAttributes), true, $message));
+      ], $extraAttributes, $errorContext), true, $message));
 
         $emitter->exportMetrics([
             $emitter->counter('php_component_errors_total', 1, ['component' => $name]),
@@ -270,6 +277,10 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
             'error' => $message,
             'span_id' => (string) ($span['spanId'] ?? ''),
             'request_id' => $requestId,
+          'error_type' => (string) ($errorContext['error.type'] ?? ''),
+          'error_function' => (string) ($errorContext['error.function'] ?? ''),
+          'error_file' => (string) ($errorContext['error.file'] ?? ''),
+          'error_line' => (int) ($errorContext['error.line'] ?? 0),
         ]);
 
         return [
@@ -994,4 +1005,35 @@ function finalize(string $path, int $status, float $requestStart, AppLogger $log
 function elapsedMs(float $requestStart): float
 {
     return round((microtime(true) - $requestStart) * 1000, 2);
+}
+
+function triggerIntentionalErrorPath(): void
+{
+  throw new RuntimeException('Intentional PHP error path triggered');
+}
+
+function describeThrowable(Throwable $error): array
+{
+  $function = '';
+  foreach ($error->getTrace() as $frame) {
+    if (!isset($frame['function'])) {
+      continue;
+    }
+    $function = (string) $frame['function'];
+    if ($function !== '{main}') {
+      break;
+    }
+  }
+
+  if ($function === '') {
+    $function = '{unknown}';
+  }
+
+  return [
+    'error.type' => get_class($error),
+    'error.message' => $error->getMessage(),
+    'error.function' => $function,
+    'error.file' => $error->getFile(),
+    'error.line' => $error->getLine(),
+  ];
 }
