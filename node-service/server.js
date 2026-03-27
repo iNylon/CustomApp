@@ -13,6 +13,8 @@ const { Resource } = require('@opentelemetry/resources');
 const serviceName = process.env.APP_SERVICE_NAME || 'node-catalog';
 const logFile = process.env.APP_LOG_FILE || '/tmp/node-catalog.log';
 const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317';
+const dbBottleneckMode = (process.env.APP_DB_BOTTLENECK_MODE || 'true').toLowerCase() !== 'false';
+const dbBottleneckLoops = Math.max(1, Number(process.env.APP_DB_BOTTLENECK_LOOPS || '12'));
 
 const sdk = new NodeSDK({
   resource: new Resource({
@@ -90,6 +92,7 @@ app.get('/inventory', async (_req, res) => {
   return tracer.startActiveSpan('node.inventory', async (span) => {
     try {
       const [rows] = await mysqlPool.query('SELECT sku, name, category, price, inventory FROM products ORDER BY id LIMIT 25');
+      const wasteQueryCount = dbBottleneckMode ? await induceMysqlBottleneck(rows) : 0;
       await redis.set('node:last_inventory_fetch', new Date().toISOString());
 
       if (Math.random() < 0.1) {
@@ -100,9 +103,11 @@ app.get('/inventory', async (_req, res) => {
       res.json({
         service: serviceName,
         items: rows,
+        waste_queries: wasteQueryCount,
         redis_marker: await redis.get('node:last_inventory_fetch'),
       });
       span.setAttribute('catalog.item_count', rows.length);
+      span.setAttribute('catalog.waste_queries', wasteQueryCount);
       span.end();
     } catch (error) {
       errorCounter.add(1, { route: '/inventory' });
@@ -114,6 +119,34 @@ app.get('/inventory', async (_req, res) => {
     }
   });
 });
+
+async function induceMysqlBottleneck(rows) {
+  const connection = await mysqlPool.getConnection();
+  const products = rows.length > 0 ? rows : [{ sku: 'SKU-100' }];
+  let totalQueries = 0;
+
+  try {
+    await connection.beginTransaction();
+    await connection.query('SELECT id FROM products WHERE id = 1 FOR UPDATE');
+    await connection.query('SELECT SLEEP(0.12)');
+    totalQueries += 2;
+
+    const loopCount = Math.max(dbBottleneckLoops, products.length);
+    for (let i = 0; i < loopCount; i += 1) {
+      const sku = products[i % products.length].sku;
+      await connection.query('SELECT inventory, price FROM products WHERE sku = ?', [sku]);
+      totalQueries += 1;
+    }
+
+    await connection.commit();
+    return totalQueries;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
 
 app.listen(Number(process.env.APP_PORT || '3000'), '0.0.0.0', () => {
   log('INFO', 'starting node catalog service', { endpoint: otlpEndpoint });

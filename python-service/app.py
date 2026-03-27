@@ -19,6 +19,8 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 SERVICE_NAME = os.getenv("APP_SERVICE_NAME", "python-recommendation")
 LOG_FILE = os.getenv("APP_LOG_FILE", "/tmp/python-recommendation.log")
 OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317")
+DB_BOTTLENECK_MODE = os.getenv("APP_DB_BOTTLENECK_MODE", "true").lower() != "false"
+DB_BOTTLENECK_LOOPS = max(1, int(os.getenv("APP_DB_BOTTLENECK_LOOPS", "10")))
 
 resource = Resource.create(
     {
@@ -106,12 +108,24 @@ def recommendations():
         cache = get_redis()
         cache_key = f"recommendations:{user_id}"
         cached = cache.get(cache_key)
-        if cached:
+        if cached and not DB_BOTTLENECK_MODE:
             payload = json.loads(cached)
             log("INFO", "served recommendations from cache", user_id=user_id)
             return jsonify(payload)
 
         with get_pg_connection() as conn, conn.cursor() as cur:
+            waste_queries = 0
+
+            if DB_BOTTLENECK_MODE:
+                cur.execute("SELECT id FROM users WHERE id = 1 FOR UPDATE")
+                cur.execute("SELECT pg_sleep(0.15)")
+                waste_queries += 2
+
+                for _ in range(DB_BOTTLENECK_LOOPS):
+                    cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,))
+                    cur.fetchone()
+                    waste_queries += 1
+
             cur.execute(
                 """
                 SELECT u.email, u.tier, r.sku, r.score
@@ -124,16 +138,26 @@ def recommendations():
             )
             rows = cur.fetchall()
 
+            items = []
+            for row in rows:
+                if DB_BOTTLENECK_MODE:
+                    cur.execute("SELECT tier FROM users WHERE id = %s", (user_id,))
+                    tier_row = cur.fetchone()
+                    waste_queries += 1
+                    tier = tier_row[0] if tier_row else row[1]
+                else:
+                    tier = row[1]
+
+                items.append({"email": row[0], "tier": tier, "sku": row[2], "score": float(row[3])})
+
         payload = {
             "service": SERVICE_NAME,
             "user_id": user_id,
-            "items": [
-                {"email": row[0], "tier": row[1], "sku": row[2], "score": float(row[3])}
-                for row in rows
-            ],
+            "items": items,
             "cache": False,
+            "waste_queries": waste_queries,
         }
-        cache.setex(cache_key, 20, json.dumps(payload))
+        cache.setex(cache_key, 5 if DB_BOTTLENECK_MODE else 20, json.dumps(payload))
 
         if random.randint(1, 100) <= 12:
             error_counter.add(1, {"route": request.path})

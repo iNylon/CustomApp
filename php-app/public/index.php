@@ -112,11 +112,13 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
 function buildSummary(string $route, AppLogger $logger): array
 {
     $mysql = queryMysql();
+  $mysqlShadow = queryMysql();
     $postgres = queryPostgres();
+  $postgresShadow = queryPostgres();
     $redis = queryRedis();
 
     $catalog = httpJson((getenv('NODE_SERVICE_URL') ?: 'http://node-catalog:3000') . '/inventory');
-    $recommendations = httpJson((getenv('PYTHON_SERVICE_URL') ?: 'http://python-recommendation:8000') . '/recommendations?user_id=' . random_int(1, 3));
+  $recommendations = httpJson((getenv('PYTHON_SERVICE_URL') ?: 'http://python-recommendation:8000') . '/recommendations?user_id=1');
     $checkout = httpJson((getenv('JAVA_SERVICE_URL') ?: 'http://java-checkout:8081') . '/quote');
 
     $logger->info('Aggregated multi-service payload', [
@@ -131,7 +133,9 @@ function buildSummary(string $route, AppLogger $logger): array
         'route' => $route,
         'timestamp' => gmdate('c'),
         'mysql' => $mysql,
+        'mysql_shadow' => $mysqlShadow,
         'postgres' => $postgres,
+        'postgres_shadow' => $postgresShadow,
         'redis' => $redis,
         'catalog' => $catalog,
         'recommendations' => $recommendations,
@@ -147,11 +151,40 @@ function queryMysql(): array
         getenv('MYSQL_PASSWORD') ?: 'app',
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
     );
-    $row = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products')->fetch(PDO::FETCH_ASSOC);
+      $wasteQueries = 0;
+
+      if (isDbBottleneckModeEnabled()) {
+        try {
+          $pdo->beginTransaction();
+          $pdo->exec('SELECT id FROM products WHERE id = 1 FOR UPDATE');
+          $pdo->exec('SELECT SLEEP(0.12)');
+          $wasteQueries += 2;
+
+          $categories = ['apparel', 'accessories', 'stationery'];
+          for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
+            $category = $categories[$i % count($categories)];
+            $stmt = $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = :category');
+            $stmt->execute(['category' => $category]);
+            $stmt->fetchColumn();
+            $wasteQueries++;
+          }
+
+          $row = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products')->fetch(PDO::FETCH_ASSOC);
+          $pdo->commit();
+        } catch (Throwable $e) {
+          if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+          }
+          throw $e;
+        }
+      } else {
+        $row = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products')->fetch(PDO::FETCH_ASSOC);
+      }
 
     return [
         'product_count' => (int) ($row['product_count'] ?? 0),
         'inventory_total' => (int) ($row['inventory_total'] ?? 0),
+        'waste_queries' => $wasteQueries,
     ];
 }
 
@@ -163,12 +196,57 @@ function queryPostgres(): array
         getenv('POSTGRES_PASSWORD') ?: 'app',
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
     );
-    $row = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations')->fetch(PDO::FETCH_ASSOC);
+      $wasteQueries = 0;
+
+      if (isDbBottleneckModeEnabled()) {
+        try {
+          $pdo->beginTransaction();
+          $pdo->exec('SELECT id FROM users WHERE id = 1 FOR UPDATE');
+          $pdo->exec('SELECT pg_sleep(0.15)');
+          $wasteQueries += 2;
+
+          for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
+            $userId = ($i % 3) + 1;
+            $stmt = $pdo->prepare('SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id');
+            $stmt->execute(['user_id' => $userId]);
+            $stmt->fetchColumn();
+            $wasteQueries++;
+          }
+
+          $row = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations')->fetch(PDO::FETCH_ASSOC);
+          $pdo->commit();
+        } catch (Throwable $e) {
+          if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+          }
+          throw $e;
+        }
+      } else {
+        $row = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations')->fetch(PDO::FETCH_ASSOC);
+      }
 
     return [
         'recommendation_count' => (int) ($row['recommendation_count'] ?? 0),
+        'waste_queries' => $wasteQueries,
     ];
 }
+
+    function isDbBottleneckModeEnabled(): bool
+    {
+      $value = getenv('APP_DB_BOTTLENECK_MODE');
+      if ($value === false) {
+        return true;
+      }
+
+      return strtolower((string) $value) !== 'false';
+    }
+
+    function getDbBottleneckLoops(): int
+    {
+      $value = (int) (getenv('APP_DB_BOTTLENECK_LOOPS') ?: 8);
+
+      return max(1, min($value, 50));
+    }
 
 function queryRedis(): array
 {

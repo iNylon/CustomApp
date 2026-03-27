@@ -33,6 +33,8 @@ services:
       JAVA_SERVICE_URL: http://java-checkout:8081
       OTEL_EXPORTER_OTLP_HTTP_ENDPOINT: http://otel-collector:4318
       OTEL_RESOURCE_ATTRIBUTES: service.name=php-storefront,service.namespace=openobserve-poc,deployment.environment=poc
+      APP_DB_BOTTLENECK_MODE: "true"
+      APP_DB_BOTTLENECK_LOOPS: "12"
     depends_on:
       - mysql
       - postgres
@@ -63,6 +65,8 @@ services:
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_SERVICE_NAME: python-recommendation
       OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc
+      APP_DB_BOTTLENECK_MODE: "true"
+      APP_DB_BOTTLENECK_LOOPS: "14"
     depends_on:
       - postgres
       - redis
@@ -89,6 +93,8 @@ services:
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_SERVICE_NAME: node-catalog
       OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc
+      APP_DB_BOTTLENECK_MODE: "true"
+      APP_DB_BOTTLENECK_LOOPS: "16"
     depends_on:
       - mysql
       - redis
