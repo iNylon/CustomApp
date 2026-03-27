@@ -502,45 +502,24 @@ function finalize(string $path, int $status, float $requestStart, AppLogger $log
         'duration_ms' => $latency,
     ]);
 
-    $emitter->exportTrace($emitter->finishSpan($emitter->startSpan('php.finalize', ['http.route' => $path]), array_merge([
-
-      $loops = max(1, min((int) (getenv('APP_REDIS_BOTTLENECK_LOOPS') ?: 20), 200));
-      $wasteOps = 0;
-      $retryConflicts = 0;
+    $span = $emitter->startSpan('php.finalize', ['http.route' => $path]);
+    $emitter->exportTrace($emitter->finishSpan($span, array_merge([
         'http.status_code' => $status,
         'http.route' => $path,
-      $hotKey = 'redis:hotspot:counter';
-
-      if (isDbBottleneckModeEnabled()) {
-        for ($i = 0; $i < $loops; $i++) {
-          $redis->watch($hotKey);
-          $current = (int) ($redis->get($hotKey) ?: 0);
-          usleep(40000);
-
-          $redis->multi();
-          $redis->set($hotKey, (string) ($current + 1));
-          $redis->expire($hotKey, 120);
-          $tx = $redis->exec();
-
-          if ($tx === false) {
-            $retryConflicts++;
-            continue;
-          }
-
-          $redis->get($hotKey);
-          $redis->pttl($hotKey);
-          $wasteOps += 4;
-        }
-      }
         'http.method' => $_SERVER['REQUEST_METHOD'] ?? 'GET',
         'duration_ms' => $latency,
     ], $extraAttributes), $status >= 500));
-    $emitter->exportMetrics([
-        'redis_waste_ops' => $wasteOps,
-        'redis_tx_conflicts' => $retryConflicts,
+
+    $metrics = [
         $emitter->counter('php_requests_total', 1, ['route' => $path, 'status' => $status]),
         $emitter->histogram('php_request_duration_ms', $latency, ['route' => $path, 'status' => $status]),
-    ]);
+    ];
+
+    if ($status >= 500) {
+        $metrics[] = $emitter->counter('php_errors_total', 1, ['route' => $path]);
+    }
+
+    $emitter->exportMetrics($metrics);
 }
 
 function elapsedMs(float $requestStart): float
