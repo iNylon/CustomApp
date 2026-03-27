@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 import psycopg2
 import redis
 from flask import Flask, jsonify, request
-from opentelemetry import metrics, trace
+from opentelemetry import context as otel_context
+from opentelemetry import metrics, propagate, trace
+from opentelemetry.trace import SpanKind
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.metrics import MeterProvider
@@ -50,11 +52,17 @@ app = Flask(__name__)
 
 
 def log(severity: str, message: str, **context):
+    span_context = trace.get_current_span().get_span_context()
+    trace_id = f"{span_context.trace_id:032x}" if span_context and span_context.is_valid else None
+    span_id = f"{span_context.span_id:016x}" if span_context and span_context.is_valid else None
+
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "severity": severity,
         "service.name": SERVICE_NAME,
         "message": message,
+        "trace_id": trace_id,
+        "span_id": span_id,
         "context": context,
     }
     line = json.dumps(entry)
@@ -84,6 +92,8 @@ def get_redis():
 @app.before_request
 def before_request():
     request._start_time = time.perf_counter()
+    extracted = propagate.extract(dict(request.headers))
+    request._otel_token = otel_context.attach(extracted)
 
 
 @app.after_request
@@ -93,6 +103,9 @@ def after_request(response):
     request_counter.add(1, attrs)
     latency_histogram.record(duration, attrs)
     log("INFO", "python request complete", path=request.path, status=response.status_code, duration_ms=round(duration, 2))
+    token = getattr(request, "_otel_token", None)
+    if token is not None:
+        otel_context.detach(token)
     return response
 
 
@@ -104,7 +117,7 @@ def healthz():
 @app.route("/recommendations")
 def recommendations():
     user_id = int(request.args.get("user_id", "1"))
-    with tracer.start_as_current_span("python.recommendations", attributes={"user.id": user_id}):
+    with tracer.start_as_current_span("python.recommendations", kind=SpanKind.SERVER, attributes={"user.id": user_id, "http.route": "/recommendations", "http.method": "GET"}):
         cache = get_redis()
         cache_key = f"recommendations:{user_id}"
         cached = cache.get(cache_key)

@@ -23,7 +23,8 @@ $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $rootSpan = $emitter->startSpan('php.request', [
     'http.method' => $method,
     'http.route' => $path,
-]);
+], null, 2);
+$logger->setTraceContext($rootSpan['traceId'], $rootSpan['spanId']);
 
 try {
     route($path, $method, $logger, $emitter, $requestStart, $rootSpan);
@@ -56,7 +57,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
     if ($path === '/') {
         header('Content-Type: text/html; charset=utf-8');
         echo renderIndex();
-        finalize($path, 200, $requestStart, $logger, $emitter, 'Rendered storefront');
+    finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Rendered storefront');
         finishRootSpan($emitter, $rootSpan, $path, 200);
         return;
     }
@@ -75,7 +76,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
             'apiVersion' => getenv('APP_RUM_API_VERSION') ?: 'v1',
             'insecureHTTP' => getenv('APP_RUM_INSECURE_HTTP') === 'true',
         ], JSON_UNESCAPED_SLASHES) . ';';
-        finalize($path, 200, $requestStart, $logger, $emitter, 'Served rum config');
+        finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Served rum config');
         finishRootSpan($emitter, $rootSpan, $path, 200);
         return;
     }
@@ -83,7 +84,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
     if ($path === '/healthz') {
         header('Content-Type: application/json');
         echo json_encode(['ok' => true], JSON_UNESCAPED_SLASHES);
-        finalize($path, 200, $requestStart, $logger, $emitter, 'Health check');
+        finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Health check');
         finishRootSpan($emitter, $rootSpan, $path, 200);
         return;
     }
@@ -93,7 +94,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
     }
 
     if ($path === '/api/summary' || $path === '/api/checkout') {
-        $payload = buildSummary($path, $logger, $emitter);
+      $payload = buildSummary($path, $logger, $emitter, $rootSpan);
 
         if ($path === '/api/checkout' && random_int(1, 100) <= 18) {
             $logger->error('Checkout chaos triggered', ['route' => $path]);
@@ -104,7 +105,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
         echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
 
         $status = $payload['degraded'] ? 206 : 200;
-        finalize($path, $status, $requestStart, $logger, $emitter, 'Served business payload', [
+        finalize($path, $status, $requestStart, $logger, $emitter, $rootSpan, 'Served business payload', [
             'cart_size' => count($payload['catalog']['items'] ?? []),
             'degraded' => $payload['degraded'],
         ]);
@@ -118,21 +119,21 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
     http_response_code(404);
     header('Content-Type: application/json');
     echo json_encode(['error' => 'Not found'], JSON_UNESCAPED_SLASHES);
-    finalize($path, 404, $requestStart, $logger, $emitter, 'Route not found');
+    finalize($path, 404, $requestStart, $logger, $emitter, $rootSpan, 'Route not found');
     finishRootSpan($emitter, $rootSpan, $path, 404);
 }
 
-function buildSummary(string $route, AppLogger $logger, OtlpHttpEmitter $emitter): array
+  function buildSummary(string $route, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan): array
 {
-    $mysqlProbe = probeStep('mysql', fn () => queryMysql(), $logger, $emitter);
-    $mysqlShadowProbe = probeStep('mysql_shadow', fn () => queryMysql(), $logger, $emitter);
-    $postgresProbe = probeStep('postgres', fn () => queryPostgres(), $logger, $emitter);
-    $postgresShadowProbe = probeStep('postgres_shadow', fn () => queryPostgres(), $logger, $emitter);
-    $redisProbe = probeStep('redis', fn () => queryRedis(), $logger, $emitter);
+    $mysqlProbe = probeStep('mysql', fn (array $_span) => queryMysql(), $logger, $emitter, $rootSpan);
+    $mysqlShadowProbe = probeStep('mysql_shadow', fn (array $_span) => queryMysql(), $logger, $emitter, $rootSpan);
+    $postgresProbe = probeStep('postgres', fn (array $_span) => queryPostgres(), $logger, $emitter, $rootSpan);
+    $postgresShadowProbe = probeStep('postgres_shadow', fn (array $_span) => queryPostgres(), $logger, $emitter, $rootSpan);
+    $redisProbe = probeStep('redis', fn (array $_span) => queryRedis(), $logger, $emitter, $rootSpan);
 
-    $catalogProbe = probeStep('node_catalog', fn () => httpJson((getenv('NODE_SERVICE_URL') ?: 'http://node-catalog:3000') . '/inventory', true), $logger, $emitter);
-    $recommendationsProbe = probeStep('python_recommendations', fn () => httpJson((getenv('PYTHON_SERVICE_URL') ?: 'http://python-recommendation:8000') . '/recommendations?user_id=1', true), $logger, $emitter);
-    $checkoutProbe = probeStep('java_checkout', fn () => httpJson((getenv('JAVA_SERVICE_URL') ?: 'http://java-checkout:8081') . '/quote', true), $logger, $emitter);
+    $catalogProbe = probeStep('node_catalog', fn (array $span) => httpJson((getenv('NODE_SERVICE_URL') ?: 'http://node-catalog:3000') . '/inventory', true, $emitter, $span), $logger, $emitter, $rootSpan);
+    $recommendationsProbe = probeStep('python_recommendations', fn (array $span) => httpJson((getenv('PYTHON_SERVICE_URL') ?: 'http://python-recommendation:8000') . '/recommendations?user_id=1', true, $emitter, $span), $logger, $emitter, $rootSpan);
+    $checkoutProbe = probeStep('java_checkout', fn (array $span) => httpJson((getenv('JAVA_SERVICE_URL') ?: 'http://java-checkout:8081') . '/quote', true, $emitter, $span), $logger, $emitter, $rootSpan);
 
     $componentErrors = count(array_filter([
         $mysqlProbe['ok'] ? null : 'mysql',
@@ -170,16 +171,16 @@ function buildSummary(string $route, AppLogger $logger, OtlpHttpEmitter $emitter
     ];
 }
 
-function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHttpEmitter $emitter): array
+function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan): array
 {
     $start = microtime(true);
     $span = $emitter->startSpan('php.component.' . $name, [
         'component.name' => $name,
         'component.type' => 'dependency',
-    ]);
+    ], $rootSpan, 3);
 
     try {
-        $data = $operation();
+    $data = $operation($span);
 
         $emitter->exportTrace($emitter->finishSpan($span, [
             'component.name' => $name,
@@ -206,6 +207,7 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
         $logger->error('Component probe failed', [
             'component' => $name,
             'error' => $message,
+          'span_id' => (string) ($span['spanId'] ?? ''),
         ]);
 
         return [
@@ -410,15 +412,24 @@ function getDbBottleneckLoops(): int
     return max(1, min($value, 50));
 }
 
-function httpJson(string $url, bool $allowServerError = false): array
+function httpJson(string $url, bool $allowServerError = false, ?OtlpHttpEmitter $emitter = null, ?array $span = null): array
 {
     global $http_response_header;
+
+  $headers = [];
+  if ($emitter !== null && $span !== null) {
+    $traceparent = $emitter->traceparentForSpan($span);
+    if ($traceparent !== '') {
+      $headers[] = 'traceparent: ' . $traceparent;
+    }
+  }
 
     $context = stream_context_create([
         'http' => [
             'method' => 'GET',
             'timeout' => 3,
             'ignore_errors' => true,
+      'header' => $headers,
         ],
     ]);
 
@@ -875,7 +886,7 @@ function finishRootSpan(OtlpHttpEmitter $emitter, array $rootSpan, string $path,
     $emitter->exportTrace($emitter->finishSpan($rootSpan, array_merge($baseAttributes, $attributes), $error));
 }
 
-function finalize(string $path, int $status, float $requestStart, AppLogger $logger, OtlpHttpEmitter $emitter, string $message, array $extraAttributes = []): void
+function finalize(string $path, int $status, float $requestStart, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan, string $message, array $extraAttributes = []): void
 {
     $latency = elapsedMs($requestStart);
     $logger->info($message, [
@@ -884,7 +895,7 @@ function finalize(string $path, int $status, float $requestStart, AppLogger $log
         'duration_ms' => $latency,
     ]);
 
-    $span = $emitter->startSpan('php.finalize', ['http.route' => $path]);
+    $span = $emitter->startSpan('php.finalize', ['http.route' => $path], $rootSpan);
     $emitter->exportTrace($emitter->finishSpan($span, array_merge([
         'http.status_code' => $status,
         'http.route' => $path,

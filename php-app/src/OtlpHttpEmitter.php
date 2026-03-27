@@ -44,15 +44,34 @@ final class OtlpHttpEmitter
         $this->post('/v1/metrics', $payload);
     }
 
-    public function startSpan(string $name, array $attributes = []): array
+    public function startSpan(string $name, array $attributes = [], ?array $parentSpan = null, int $kind = 1): array
     {
-        return [
+        $span = [
             'name' => $name,
-            'traceId' => bin2hex(random_bytes(16)),
+            'traceId' => $parentSpan['traceId'] ?? bin2hex(random_bytes(16)),
             'spanId' => bin2hex(random_bytes(8)),
+            'kind' => $kind,
             'startTimeUnixNano' => $this->nowNano(),
             'attributes' => $this->attributes($attributes),
         ];
+
+        if (isset($parentSpan['spanId'])) {
+            $span['parentSpanId'] = (string) $parentSpan['spanId'];
+        }
+
+        return $span;
+    }
+
+    public function traceparentForSpan(array $span): string
+    {
+        $traceId = (string) ($span['traceId'] ?? '');
+        $spanId = (string) ($span['spanId'] ?? '');
+
+        if ($traceId === '' || $spanId === '') {
+            return '';
+        }
+
+        return sprintf('00-%s-%s-01', $traceId, $spanId);
     }
 
     public function finishSpan(array $span, array $attributes = [], bool $error = false, string $message = ''): array

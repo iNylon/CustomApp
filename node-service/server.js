@@ -61,11 +61,15 @@ redis.connect().catch((error) => {
 const app = express();
 
 function log(severity, message, context = {}) {
+  const activeSpan = trace.getActiveSpan();
+  const spanContext = activeSpan ? activeSpan.spanContext() : undefined;
   const entry = JSON.stringify({
     timestamp: new Date().toISOString(),
     severity,
     'service.name': serviceName,
     message,
+    trace_id: spanContext ? spanContext.traceId : undefined,
+    span_id: spanContext ? spanContext.spanId : undefined,
     context,
   });
   fs.appendFileSync(logFile, entry + '\n');

@@ -2,6 +2,7 @@ package nl.dylan.openobserve;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.Headers;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
@@ -9,8 +10,14 @@ import io.opentelemetry.api.metrics.DoubleHistogram;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.api.trace.propagation.W3CTraceContextPropagator;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.Scope;
+import io.opentelemetry.context.propagation.TextMapGetter;
 import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -24,10 +31,10 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import redis.clients.jedis.Jedis;
 
 public final class App {
@@ -39,6 +46,24 @@ public final class App {
   private static final int PORT = Integer.parseInt(System.getenv().getOrDefault("APP_PORT", "8081"));
   private static final int FAILURE_RATE_PERCENT = Integer.parseInt(System.getenv().getOrDefault("APP_SYNTHETIC_FAILURE_RATE_PERCENT", "8"));
   private static final Random RANDOM = new Random();
+  private static final TextMapGetter<Headers> HEADER_GETTER = new TextMapGetter<>() {
+    @Override
+    public Iterable<String> keys(Headers carrier) {
+      return carrier.keySet();
+    }
+
+    @Override
+    public String get(Headers carrier, String key) {
+      if (carrier == null) {
+        return null;
+      }
+      List<String> values = carrier.get(key);
+      if (values == null || values.isEmpty()) {
+        return null;
+      }
+      return values.get(0);
+    }
+  };
 
   private App() {
   }
@@ -84,8 +109,9 @@ public final class App {
 
     server.createContext("/quote", exchange -> {
       long start = System.nanoTime();
-      Span span = tracer.spanBuilder("java.quote").startSpan();
-      try (Jedis jedis = new Jedis(REDIS_HOST, REDIS_PORT)) {
+      Context parentContext = W3CTraceContextPropagator.getInstance().extract(Context.root(), exchange.getRequestHeaders(), HEADER_GETTER);
+      Span span = tracer.spanBuilder("java.quote").setParent(parentContext).setSpanKind(SpanKind.SERVER).startSpan();
+      try (Scope scope = span.makeCurrent(); Jedis jedis = new Jedis(REDIS_HOST, REDIS_PORT)) {
         jedis.set("java:last_quote", Instant.now().toString());
         double quote = 29.99 + RANDOM.nextInt(60);
         boolean failure = RANDOM.nextInt(100) < Math.max(0, Math.min(FAILURE_RATE_PERCENT, 100));
@@ -125,12 +151,18 @@ public final class App {
   }
 
   private static void log(String severity, String message, Map<String, Object> context) throws IOException {
+    SpanContext spanContext = Span.current().getSpanContext();
+    String traceId = spanContext.isValid() ? spanContext.getTraceId() : "";
+    String spanId = spanContext.isValid() ? spanContext.getSpanId() : "";
+    String tracePart = traceId.isEmpty() ? "" : String.format(",\"trace_id\":\"%s\",\"span_id\":\"%s\"", traceId, spanId);
+
     String entry = String.format(
-        "{\"timestamp\":\"%s\",\"severity\":\"%s\",\"service.name\":\"%s\",\"message\":\"%s\",\"context\":%s}%n",
+      "{\"timestamp\":\"%s\",\"severity\":\"%s\",\"service.name\":\"%s\",\"message\":\"%s\"%s,\"context\":%s}%n",
         Instant.now(),
         severity,
         SERVICE_NAME,
         message.replace("\"", "'"),
+      tracePart,
         mapToJson(context));
     java.nio.file.Files.writeString(
         java.nio.file.Path.of(LOG_FILE),
