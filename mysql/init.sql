@@ -17,3 +17,10 @@ ON DUPLICATE KEY UPDATE
   category = VALUES(category),
   price = VALUES(price),
   inventory = VALUES(inventory);
+
+CREATE TABLE IF NOT EXISTS app_users (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

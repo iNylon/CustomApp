@@ -59,10 +59,27 @@ if (!hasRequiredConfig) {
     apiVersion: options.apiVersion,
   });
 
-  openobserveRum.setUser({
-    id: 'demo-user-1',
-    name: 'OpenObserve Demo User',
-    email: 'demo@example.com',
+  window.__setOpenObserveUser = (user) => {
+    if (!user || !user.email) {
+      return;
+    }
+
+    openobserveRum.setUser({
+      id: user.id || user.email,
+      name: user.name || user.email,
+      email: user.email,
+    });
+
+    openobserveLogs.logger.info('OpenObserve user context updated', {
+      email: user.email,
+      id: user.id || user.email,
+    });
+  };
+
+  window.__setOpenObserveUser({
+    id: 'anonymous',
+    name: 'Anonymous Visitor',
+    email: 'anonymous@example.local',
   });
 
   openobserveRum.startSessionReplayRecording();

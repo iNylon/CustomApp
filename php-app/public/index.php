@@ -2,6 +2,13 @@
 
 declare(strict_types=1);
 
+if (session_status() !== PHP_SESSION_ACTIVE) {
+  session_start([
+    'cookie_httponly' => true,
+    'cookie_samesite' => 'Lax',
+  ]);
+}
+
 require_once __DIR__ . '/../src/AppLogger.php';
 require_once __DIR__ . '/../src/OtlpHttpEmitter.php';
 
@@ -101,6 +108,139 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
         finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Health check');
         finishRootSpan($emitter, $rootSpan, $path, 200);
         return;
+    }
+
+    if ($path === '/api/register' && $method === 'POST') {
+      $payload = jsonBody();
+      $email = normalizeEmail((string) ($payload['email'] ?? ''));
+      $password = (string) ($payload['password'] ?? '');
+
+      if (!isValidEmail($email) || strlen($password) < 8) {
+        sendJson(422, ['error' => 'Gebruik een geldig e-mailadres en minimaal 8 tekens wachtwoord.']);
+        finalize($path, 422, $requestStart, $logger, $emitter, $rootSpan, 'Register validation failed');
+        finishRootSpan($emitter, $rootSpan, $path, 422, [
+          'auth.action' => 'register',
+          'auth.success' => false,
+          'user.email' => $email,
+        ]);
+        return;
+      }
+
+      $created = registerUser($email, $password);
+      if (!$created['ok']) {
+        sendJson(409, ['error' => 'E-mailadres bestaat al.']);
+        $logger->error('Register failed: duplicate email', ['email' => $email]);
+        $emitter->exportMetrics([
+          $emitter->counter('php_auth_events_total', 1, ['action' => 'register', 'result' => 'duplicate']),
+        ]);
+        finalize($path, 409, $requestStart, $logger, $emitter, $rootSpan, 'Register duplicate email');
+        finishRootSpan($emitter, $rootSpan, $path, 409, [
+          'auth.action' => 'register',
+          'auth.success' => false,
+          'user.email' => $email,
+        ]);
+        return;
+      }
+
+      setAuthenticatedUser((int) $created['user_id'], $email);
+      $logger->info('User registered', ['email' => $email]);
+      $emitter->exportMetrics([
+        $emitter->counter('php_auth_events_total', 1, ['action' => 'register', 'result' => 'success']),
+      ]);
+      sendJson(201, ['ok' => true, 'user' => ['id' => (int) $created['user_id'], 'email' => $email]]);
+      finalize($path, 201, $requestStart, $logger, $emitter, $rootSpan, 'User registered');
+      finishRootSpan($emitter, $rootSpan, $path, 201, [
+        'auth.action' => 'register',
+        'auth.success' => true,
+        'user.email' => $email,
+        'user.id' => (int) $created['user_id'],
+      ]);
+      return;
+    }
+
+    if ($path === '/api/login' && $method === 'POST') {
+      $payload = jsonBody();
+      $email = normalizeEmail((string) ($payload['email'] ?? ''));
+      $password = (string) ($payload['password'] ?? '');
+
+      if (!isValidEmail($email) || $password === '') {
+        sendJson(422, ['error' => 'Vul een geldig e-mailadres en wachtwoord in.']);
+        finalize($path, 422, $requestStart, $logger, $emitter, $rootSpan, 'Login validation failed');
+        finishRootSpan($emitter, $rootSpan, $path, 422, [
+          'auth.action' => 'login',
+          'auth.success' => false,
+          'user.email' => $email,
+        ]);
+        return;
+      }
+
+      $user = loginUser($email, $password);
+      if ($user === null) {
+        sendJson(401, ['error' => 'Onjuiste inloggegevens.']);
+        $logger->error('Login failed', ['email' => $email]);
+        $emitter->exportMetrics([
+          $emitter->counter('php_auth_events_total', 1, ['action' => 'login', 'result' => 'failed']),
+        ]);
+        finalize($path, 401, $requestStart, $logger, $emitter, $rootSpan, 'Login failed');
+        finishRootSpan($emitter, $rootSpan, $path, 401, [
+          'auth.action' => 'login',
+          'auth.success' => false,
+          'user.email' => $email,
+        ]);
+        return;
+      }
+
+      setAuthenticatedUser((int) $user['id'], (string) $user['email']);
+      $logger->info('User logged in', ['email' => (string) $user['email']]);
+      $emitter->exportMetrics([
+        $emitter->counter('php_auth_events_total', 1, ['action' => 'login', 'result' => 'success']),
+      ]);
+      sendJson(200, ['ok' => true, 'user' => ['id' => (int) $user['id'], 'email' => (string) $user['email']]]);
+      finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'User logged in');
+      finishRootSpan($emitter, $rootSpan, $path, 200, [
+        'auth.action' => 'login',
+        'auth.success' => true,
+        'user.email' => (string) $user['email'],
+        'user.id' => (int) $user['id'],
+      ]);
+      return;
+    }
+
+    if ($path === '/api/logout' && $method === 'POST') {
+      $email = (string) ($_SESSION['user_email'] ?? '');
+      clearAuthenticatedUser();
+      $logger->info('User logged out', ['email' => $email]);
+      $emitter->exportMetrics([
+        $emitter->counter('php_auth_events_total', 1, ['action' => 'logout', 'result' => 'success']),
+      ]);
+      sendJson(200, ['ok' => true]);
+      finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'User logged out');
+      finishRootSpan($emitter, $rootSpan, $path, 200, [
+        'auth.action' => 'logout',
+        'auth.success' => true,
+        'user.email' => $email,
+      ]);
+      return;
+    }
+
+    if ($path === '/api/me' && $method === 'GET') {
+      $user = currentAuthenticatedUser();
+      if ($user === null) {
+        sendJson(200, ['authenticated' => false]);
+        finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Auth me anonymous');
+        finishRootSpan($emitter, $rootSpan, $path, 200, ['auth.authenticated' => false]);
+        return;
+      }
+
+      $logger->info('Auth me resolved', ['email' => $user['email']]);
+      sendJson(200, ['authenticated' => true, 'user' => $user]);
+      finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Auth me resolved');
+      finishRootSpan($emitter, $rootSpan, $path, 200, [
+        'auth.authenticated' => true,
+        'user.email' => (string) $user['email'],
+        'user.id' => (int) $user['id'],
+      ]);
+      return;
     }
 
     if ($path === '/api/error') {
@@ -485,6 +625,139 @@ function getDbBottleneckLoops(): int
     return max(1, min($value, 50));
 }
 
+function appMysqlPdo(): PDO
+{
+  $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+  if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
+    $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = true;
+  }
+
+  return new PDO(
+    getenv('MYSQL_DSN') ?: 'mysql:host=mysql;port=3306;dbname=catalog',
+    getenv('MYSQL_USER') ?: 'app',
+    getenv('MYSQL_PASSWORD') ?: 'app',
+    $options
+  );
+}
+
+function ensureAuthSchema(PDO $pdo): void
+{
+  static $initialized = false;
+  if ($initialized) {
+    return;
+  }
+
+  $pdo->exec(
+    'CREATE TABLE IF NOT EXISTS app_users (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+  );
+
+  $initialized = true;
+}
+
+function isValidEmail(string $email): bool
+{
+  return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
+}
+
+function normalizeEmail(string $email): string
+{
+  return strtolower(trim($email));
+}
+
+function jsonBody(): array
+{
+  $raw = file_get_contents('php://input');
+  if ($raw === false || $raw === '') {
+    return [];
+  }
+
+  $decoded = json_decode($raw, true);
+  return is_array($decoded) ? $decoded : [];
+}
+
+function sendJson(int $status, array $payload): void
+{
+  http_response_code($status);
+  header('Content-Type: application/json');
+  echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+}
+
+function registerUser(string $email, string $password): array
+{
+  $pdo = appMysqlPdo();
+  ensureAuthSchema($pdo);
+
+  $check = $pdo->prepare('SELECT id FROM app_users WHERE email = :email LIMIT 1');
+  $check->execute(['email' => $email]);
+  $existing = $check->fetch(PDO::FETCH_ASSOC);
+  $check->closeCursor();
+
+  if (is_array($existing)) {
+    return ['ok' => false];
+  }
+
+  $hash = password_hash($password, PASSWORD_DEFAULT);
+  $insert = $pdo->prepare('INSERT INTO app_users (email, password_hash) VALUES (:email, :password_hash)');
+  $insert->execute([
+    'email' => $email,
+    'password_hash' => $hash,
+  ]);
+
+  return ['ok' => true, 'user_id' => (int) $pdo->lastInsertId()];
+}
+
+function loginUser(string $email, string $password): ?array
+{
+  $pdo = appMysqlPdo();
+  ensureAuthSchema($pdo);
+
+  $stmt = $pdo->prepare('SELECT id, email, password_hash FROM app_users WHERE email = :email LIMIT 1');
+  $stmt->execute(['email' => $email]);
+  $row = $stmt->fetch(PDO::FETCH_ASSOC);
+  $stmt->closeCursor();
+
+  if (!is_array($row)) {
+    return null;
+  }
+
+  if (!password_verify($password, (string) $row['password_hash'])) {
+    return null;
+  }
+
+  return [
+    'id' => (int) $row['id'],
+    'email' => (string) $row['email'],
+  ];
+}
+
+function setAuthenticatedUser(int $userId, string $email): void
+{
+  $_SESSION['user_id'] = $userId;
+  $_SESSION['user_email'] = $email;
+}
+
+function clearAuthenticatedUser(): void
+{
+  unset($_SESSION['user_id'], $_SESSION['user_email']);
+}
+
+function currentAuthenticatedUser(): ?array
+{
+  if (!isset($_SESSION['user_id'], $_SESSION['user_email'])) {
+    return null;
+  }
+
+  return [
+    'id' => (int) $_SESSION['user_id'],
+    'email' => (string) $_SESSION['user_email'],
+  ];
+}
+
 function httpJson(string $url, bool $allowServerError = false, ?OtlpHttpEmitter $emitter = null, ?array $span = null): array
 {
     global $http_response_header;
@@ -679,6 +952,46 @@ function renderIndex(): string
     .btn-sub { background: #1f685a; color: #fff; }
     .btn-clear { background: #ebebeb; color: #242424; }
     .btn-alert { background: #b42318; color: #fff; }
+    .auth-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .auth-card h3 {
+      margin: 0;
+      font-family: Fraunces, serif;
+      font-size: 1.1rem;
+    }
+    .auth-form {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(244, 234, 213, 0.25);
+    }
+    .auth-form label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .auth-user {
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: #fdfdfd;
+      display: grid;
+      gap: 8px;
+    }
+    .auth-status {
+      margin: 0;
+      font-size: 0.86rem;
+      color: rgba(30, 41, 50, 0.8);
+    }
     .side {
       padding: 16px;
       display: grid;
@@ -764,6 +1077,29 @@ function renderIndex(): string
 
       <aside class="panel side">
         <h2 style="margin: 0; font-family: Fraunces, serif;">Winkelwagen <span class="pill">RUM heavy</span></h2>
+
+        <div class="auth-card">
+          <h3>Account</h3>
+          <div id="auth-guest" style="display:grid; gap:8px;">
+            <form id="form-register" class="auth-form">
+              <label for="register-email">Registreren</label>
+              <input id="register-email" name="email" type="email" placeholder="jij@voorbeeld.nl" required>
+              <input id="register-password" name="password" type="password" placeholder="Wachtwoord (min. 8 tekens)" minlength="8" required>
+              <button class="btn-main" type="submit">Register</button>
+            </form>
+            <form id="form-login" class="auth-form">
+              <label for="login-email">Inloggen</label>
+              <input id="login-email" name="email" type="email" placeholder="jij@voorbeeld.nl" required>
+              <input id="login-password" name="password" type="password" placeholder="Wachtwoord" required>
+              <button class="btn-sub" type="submit">Inloggen</button>
+            </form>
+          </div>
+          <div id="auth-user" class="auth-user" hidden>
+            <p class="auth-status">Ingelogd als <strong id="auth-email">-</strong></p>
+            <button class="btn-clear" id="btn-logout">Uitloggen</button>
+          </div>
+        </div>
+
         <div class="kpi">
           <div><strong id="kpi-items">0</strong><span>Items</span></div>
           <div><strong id="kpi-subtotal">0.00</strong><span>Subtotal</span></div>
@@ -803,6 +1139,12 @@ function renderIndex(): string
     const kpiLat = document.getElementById('kpi-lat');
     const searchInput = document.getElementById('search');
     const categoryInput = document.getElementById('category');
+    const authGuest = document.getElementById('auth-guest');
+    const authUser = document.getElementById('auth-user');
+    const authEmail = document.getElementById('auth-email');
+    const registerForm = document.getElementById('form-register');
+    const loginForm = document.getElementById('form-login');
+    const logoutButton = document.getElementById('btn-logout');
 
     function euro(value) {
       return Number(value).toFixed(2);
@@ -919,6 +1261,60 @@ function renderIndex(): string
       }
     }
 
+    async function requestJson(path, method, body) {
+      const response = await fetch(path, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (_error) {
+        payload = {};
+      }
+
+      if (!response.ok) {
+        const message = payload && payload.error ? payload.error : `Request failed (${response.status})`;
+        throw new Error(message);
+      }
+
+      return payload;
+    }
+
+    function applyAuthState(authResponse) {
+      const authenticated = Boolean(authResponse && authResponse.authenticated && authResponse.user);
+      if (!authenticated) {
+        authGuest.hidden = false;
+        authUser.hidden = true;
+        authEmail.textContent = '-';
+        return;
+      }
+
+      const email = authResponse.user.email || '';
+      authGuest.hidden = true;
+      authUser.hidden = false;
+      authEmail.textContent = email;
+
+      if (typeof window.__setOpenObserveUser === 'function' && email) {
+        window.__setOpenObserveUser({
+          id: String(authResponse.user.id || email),
+          name: email,
+          email,
+        });
+      }
+    }
+
+    async function refreshAuthState() {
+      try {
+        const payload = await requestJson('/api/me', 'GET');
+        applyAuthState(payload);
+      } catch (error) {
+        appendLog('auth:state-failed', { error: error.message });
+      }
+    }
+
     async function triggerAlertBurst() {
       const alertButton = document.getElementById('btn-alert');
       const burstSize = 8;
@@ -973,6 +1369,46 @@ function renderIndex(): string
       triggerAlertBurst();
     });
 
+    registerForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const email = document.getElementById('register-email').value.trim();
+      const password = document.getElementById('register-password').value;
+
+      try {
+        const payload = await requestJson('/api/register', 'POST', { email, password });
+        appendLog('auth:register-success', { email });
+        applyAuthState({ authenticated: true, user: payload.user });
+        registerForm.reset();
+      } catch (error) {
+        appendLog('auth:register-failed', { email, error: error.message });
+      }
+    });
+
+    loginForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const email = document.getElementById('login-email').value.trim();
+      const password = document.getElementById('login-password').value;
+
+      try {
+        const payload = await requestJson('/api/login', 'POST', { email, password });
+        appendLog('auth:login-success', { email });
+        applyAuthState({ authenticated: true, user: payload.user });
+        loginForm.reset();
+      } catch (error) {
+        appendLog('auth:login-failed', { email, error: error.message });
+      }
+    });
+
+    logoutButton.addEventListener('click', async () => {
+      try {
+        await requestJson('/api/logout', 'POST');
+        appendLog('auth:logout-success', {});
+        applyAuthState({ authenticated: false });
+      } catch (error) {
+        appendLog('auth:logout-failed', { error: error.message });
+      }
+    });
+
     searchInput.addEventListener('input', () => {
       renderGrid();
       triggerBrowseTelemetry();
@@ -985,6 +1421,7 @@ function renderIndex(): string
 
     renderGrid();
     renderCart();
+    refreshAuthState();
     callApi('/api/summary', 'startup:summary');
   </script>
 </body>
