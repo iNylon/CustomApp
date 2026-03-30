@@ -1200,8 +1200,11 @@ function renderIndex(): string
     }
     .toolbar {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: minmax(0, 1fr) 210px;
       gap: 8px;
+    }
+    .toolbar > * {
+      min-width: 0;
     }
     input, select {
       width: 100%;
