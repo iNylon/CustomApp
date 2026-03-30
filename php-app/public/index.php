@@ -678,6 +678,7 @@ function renderIndex(): string
     .btn-main { background: var(--accent); color: #fff; }
     .btn-sub { background: #1f685a; color: #fff; }
     .btn-clear { background: #ebebeb; color: #242424; }
+    .btn-alert { background: #b42318; color: #fff; }
     .side {
       padding: 16px;
       display: grid;
@@ -775,6 +776,7 @@ function renderIndex(): string
           <button class="btn-main" id="btn-summary">Ververs aanbevelingen</button>
           <button class="btn-sub" id="btn-checkout">Bestelling afronden</button>
           <button class="btn-clear" id="btn-chaos">Trigger foutpad</button>
+          <button class="btn-alert" id="btn-alert">Trigger alert</button>
         </div>
 
         <div class="log" id="log">Start webshop-simulatie: voeg producten toe en klik op acties.</div>
@@ -917,6 +919,36 @@ function renderIndex(): string
       }
     }
 
+    async function triggerAlertBurst() {
+      const alertButton = document.getElementById('btn-alert');
+      const burstSize = 8;
+      alertButton.disabled = true;
+      alertButton.textContent = 'Triggering...';
+
+      appendLog('manual:alert-burst:start', { requests: burstSize, endpoint: '/api/error' });
+
+      const jobs = Array.from({ length: burstSize }, (_, index) =>
+        fetch('/api/error', { method: 'GET' })
+          .then((response) => ({ ok: response.ok, status: response.status, index }))
+          .catch((error) => ({ ok: false, status: 0, index, error: error.message }))
+      );
+
+      const results = await Promise.all(jobs);
+      const statusCounts = results.reduce((acc, result) => {
+        const key = String(result.status);
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+      }, {});
+
+      appendLog('manual:alert-burst:done', {
+        requests: burstSize,
+        status_counts: statusCounts,
+      });
+
+      alertButton.disabled = false;
+      alertButton.textContent = 'Trigger alert';
+    }
+
     let filterTimer;
     function triggerBrowseTelemetry() {
       clearTimeout(filterTimer);
@@ -935,6 +967,10 @@ function renderIndex(): string
 
     document.getElementById('btn-chaos').addEventListener('click', () => {
       callApi('/api/error', 'manual:error-path');
+    });
+
+    document.getElementById('btn-alert').addEventListener('click', () => {
+      triggerAlertBurst();
     });
 
     searchInput.addEventListener('input', () => {
