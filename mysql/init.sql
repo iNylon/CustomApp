@@ -24,3 +24,26 @@ CREATE TABLE IF NOT EXISTS app_users (
   password_hash VARCHAR(255) NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS app_orders (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  order_number VARCHAR(32) NOT NULL UNIQUE,
+  user_id INT NOT NULL,
+  user_email VARCHAR(255) NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  total_amount DECIMAL(10,2) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_user_created (user_id, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS app_order_items (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  order_id INT NOT NULL,
+  sku VARCHAR(32) NOT NULL,
+  product_name VARCHAR(128) NOT NULL,
+  unit_price DECIMAL(10,2) NOT NULL,
+  quantity INT NOT NULL,
+  line_total DECIMAL(10,2) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_order_id (order_id)
+);

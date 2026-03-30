@@ -83,6 +83,14 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
         return;
     }
 
+    if ($path === '/auth') {
+      header('Content-Type: text/html; charset=utf-8');
+      echo renderAuthPage();
+      finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Rendered auth page');
+      finishRootSpan($emitter, $rootSpan, $path, 200);
+      return;
+    }
+
     if ($path === '/rum-config.js') {
         header('Content-Type: application/javascript; charset=utf-8');
         echo 'window.__OPENOBSERVE_RUM__ = ' . json_encode([
@@ -243,17 +251,33 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
       return;
     }
 
+    if ($path === '/api/orders' && $method === 'GET') {
+      $user = currentAuthenticatedUser();
+      if ($user === null) {
+        sendJson(401, ['error' => 'Log eerst in om je bestellingen te zien.']);
+        finalize($path, 401, $requestStart, $logger, $emitter, $rootSpan, 'Orders unauthorized');
+        finishRootSpan($emitter, $rootSpan, $path, 401, ['auth.required' => true]);
+        return;
+      }
+
+      $orders = listUserOrders((int) $user['id']);
+      sendJson(200, ['orders' => $orders]);
+      finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Orders listed', ['order_count' => count($orders)]);
+      finishRootSpan($emitter, $rootSpan, $path, 200, ['order_count' => count($orders), 'user.id' => (int) $user['id']]);
+      return;
+    }
+
     if ($path === '/api/error') {
       triggerIntentionalErrorPath();
     }
 
-    if ($path === '/api/summary' || $path === '/api/checkout') {
+    if ($path === '/api/summary' && $method === 'GET') {
       $payload = buildSummary($path, $logger, $emitter, $rootSpan);
 
         header('Content-Type: application/json');
         echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
 
-      $status = $path === '/api/checkout' ? 200 : ($payload['degraded'] ? 206 : 200);
+      $status = $payload['degraded'] ? 206 : 200;
         finalize($path, $status, $requestStart, $logger, $emitter, $rootSpan, 'Served business payload', [
             'cart_size' => count($payload['catalog']['items'] ?? []),
             'degraded' => $payload['degraded'],
@@ -263,6 +287,59 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
             'component_errors' => $payload['component_errors'],
         ], $payload['degraded']);
         return;
+    }
+
+    if ($path === '/api/checkout' && $method === 'POST') {
+      $user = currentAuthenticatedUser();
+      if ($user === null) {
+        sendJson(401, ['error' => 'Je moet ingelogd zijn om te bestellen.']);
+        finalize($path, 401, $requestStart, $logger, $emitter, $rootSpan, 'Checkout unauthorized');
+        finishRootSpan($emitter, $rootSpan, $path, 401, ['auth.required' => true]);
+        return;
+      }
+
+      $payload = jsonBody();
+      $cartItems = normalizeCheckoutCartItems($payload['items'] ?? []);
+      if ($cartItems === []) {
+        sendJson(422, ['error' => 'Je winkelwagen is leeg.']);
+        finalize($path, 422, $requestStart, $logger, $emitter, $rootSpan, 'Checkout failed: empty cart');
+        finishRootSpan($emitter, $rootSpan, $path, 422, ['checkout.success' => false]);
+        return;
+      }
+
+      $order = createOrder((int) $user['id'], (string) $user['email'], $cartItems);
+      $summary = buildSummary($path, $logger, $emitter, $rootSpan);
+      $summary['checkout_success'] = true;
+      $summary['order'] = $order;
+      $summary['order_count'] = count($order['items']);
+      $summary['order_total'] = $order['total_amount'];
+
+      $logger->info('Order created', [
+        'order_id' => $order['order_id'],
+        'user_email' => $user['email'],
+        'items' => count($order['items']),
+        'total_amount' => $order['total_amount'],
+      ]);
+      $emitter->exportMetrics([
+        $emitter->counter('php_orders_total', 1, ['status' => 'confirmed']),
+        $emitter->histogram('php_order_value_eur', (float) $order['total_amount']),
+      ]);
+
+      header('Content-Type: application/json');
+      echo json_encode($summary, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+      finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Checkout completed', [
+        'checkout.success' => true,
+        'order.id' => (string) $order['order_id'],
+        'order.total' => (float) $order['total_amount'],
+        'user.email' => (string) $user['email'],
+      ]);
+      finishRootSpan($emitter, $rootSpan, $path, 200, [
+        'checkout.success' => true,
+        'order.id' => (string) $order['order_id'],
+        'order.total' => (float) $order['total_amount'],
+        'user.email' => (string) $user['email'],
+      ]);
+      return;
     }
 
     http_response_code(404);
@@ -656,6 +733,33 @@ function ensureAuthSchema(PDO $pdo): void
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
   );
 
+  $pdo->exec(
+    'CREATE TABLE IF NOT EXISTS app_orders (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      order_number VARCHAR(32) NOT NULL UNIQUE,
+      user_id INT NOT NULL,
+      user_email VARCHAR(255) NOT NULL,
+      status VARCHAR(32) NOT NULL,
+      total_amount DECIMAL(10,2) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_user_created (user_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+  );
+
+  $pdo->exec(
+    'CREATE TABLE IF NOT EXISTS app_order_items (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      order_id INT NOT NULL,
+      sku VARCHAR(32) NOT NULL,
+      product_name VARCHAR(128) NOT NULL,
+      unit_price DECIMAL(10,2) NOT NULL,
+      quantity INT NOT NULL,
+      line_total DECIMAL(10,2) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_order_id (order_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+  );
+
   $initialized = true;
 }
 
@@ -758,6 +862,175 @@ function currentAuthenticatedUser(): ?array
   ];
 }
 
+function normalizeCheckoutCartItems(mixed $items): array
+{
+  if (!is_array($items)) {
+    return [];
+  }
+
+  $normalized = [];
+  foreach ($items as $item) {
+    if (!is_array($item)) {
+      continue;
+    }
+
+    $sku = strtoupper(trim((string) ($item['sku'] ?? '')));
+    $quantity = (int) ($item['quantity'] ?? 0);
+    if ($sku === '' || $quantity <= 0) {
+      continue;
+    }
+
+    if (!isset($normalized[$sku])) {
+      $normalized[$sku] = 0;
+    }
+    $normalized[$sku] += min($quantity, 99);
+  }
+
+  $result = [];
+  foreach ($normalized as $sku => $quantity) {
+    $result[] = ['sku' => $sku, 'quantity' => $quantity];
+  }
+
+  return $result;
+}
+
+function createOrder(int $userId, string $userEmail, array $cartItems): array
+{
+  $pdo = appMysqlPdo();
+  ensureAuthSchema($pdo);
+
+  $skus = array_map(static fn (array $item): string => (string) $item['sku'], $cartItems);
+  $placeholders = implode(',', array_fill(0, count($skus), '?'));
+  $stmt = $pdo->prepare('SELECT sku, name, price FROM products WHERE sku IN (' . $placeholders . ')');
+  $stmt->execute($skus);
+  $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+  $stmt->closeCursor();
+
+  $catalog = [];
+  foreach ($rows as $row) {
+    $catalog[(string) $row['sku']] = $row;
+  }
+
+  $items = [];
+  $total = 0.0;
+  foreach ($cartItems as $item) {
+    $sku = (string) $item['sku'];
+    if (!isset($catalog[$sku])) {
+      continue;
+    }
+
+    $name = (string) $catalog[$sku]['name'];
+    $unit = (float) $catalog[$sku]['price'];
+    $qty = (int) $item['quantity'];
+    $line = round($unit * $qty, 2);
+    $total += $line;
+    $items[] = [
+      'sku' => $sku,
+      'name' => $name,
+      'unit_price' => round($unit, 2),
+      'quantity' => $qty,
+      'line_total' => $line,
+    ];
+  }
+
+  if ($items === []) {
+    throw new RuntimeException('Geen geldige producten in winkelwagen.');
+  }
+
+  $orderNumber = 'ORD-' . strtoupper(bin2hex(random_bytes(4)));
+
+  try {
+    $pdo->beginTransaction();
+
+    $insertOrder = $pdo->prepare('INSERT INTO app_orders (order_number, user_id, user_email, status, total_amount) VALUES (:order_number, :user_id, :user_email, :status, :total_amount)');
+    $insertOrder->execute([
+      'order_number' => $orderNumber,
+      'user_id' => $userId,
+      'user_email' => $userEmail,
+      'status' => 'confirmed',
+      'total_amount' => round($total, 2),
+    ]);
+    $orderId = (int) $pdo->lastInsertId();
+
+    $insertItem = $pdo->prepare('INSERT INTO app_order_items (order_id, sku, product_name, unit_price, quantity, line_total) VALUES (:order_id, :sku, :product_name, :unit_price, :quantity, :line_total)');
+    foreach ($items as $item) {
+      $insertItem->execute([
+        'order_id' => $orderId,
+        'sku' => $item['sku'],
+        'product_name' => $item['name'],
+        'unit_price' => $item['unit_price'],
+        'quantity' => $item['quantity'],
+        'line_total' => $item['line_total'],
+      ]);
+    }
+
+    $pdo->commit();
+  } catch (Throwable $error) {
+    if ($pdo->inTransaction()) {
+      $pdo->rollBack();
+    }
+    throw $error;
+  }
+
+  return [
+    'order_id' => $orderNumber,
+    'status' => 'confirmed',
+    'total_amount' => round($total, 2),
+    'items' => $items,
+  ];
+}
+
+function listUserOrders(int $userId): array
+{
+  $pdo = appMysqlPdo();
+  ensureAuthSchema($pdo);
+
+  $ordersStmt = $pdo->prepare('SELECT id, order_number, status, total_amount, created_at FROM app_orders WHERE user_id = :user_id ORDER BY id DESC LIMIT 20');
+  $ordersStmt->execute(['user_id' => $userId]);
+  $orders = $ordersStmt->fetchAll(PDO::FETCH_ASSOC);
+  $ordersStmt->closeCursor();
+
+  if ($orders === []) {
+    return [];
+  }
+
+  $orderIds = array_map(static fn (array $order): int => (int) $order['id'], $orders);
+  $placeholders = implode(',', array_fill(0, count($orderIds), '?'));
+  $itemsStmt = $pdo->prepare('SELECT order_id, sku, product_name, unit_price, quantity, line_total FROM app_order_items WHERE order_id IN (' . $placeholders . ') ORDER BY id ASC');
+  $itemsStmt->execute($orderIds);
+  $rows = $itemsStmt->fetchAll(PDO::FETCH_ASSOC);
+  $itemsStmt->closeCursor();
+
+  $itemsByOrder = [];
+  foreach ($rows as $row) {
+    $orderId = (int) $row['order_id'];
+    if (!isset($itemsByOrder[$orderId])) {
+      $itemsByOrder[$orderId] = [];
+    }
+    $itemsByOrder[$orderId][] = [
+      'sku' => (string) $row['sku'],
+      'name' => (string) $row['product_name'],
+      'unit_price' => (float) $row['unit_price'],
+      'quantity' => (int) $row['quantity'],
+      'line_total' => (float) $row['line_total'],
+    ];
+  }
+
+  $result = [];
+  foreach ($orders as $order) {
+    $id = (int) $order['id'];
+    $result[] = [
+      'order_id' => (string) $order['order_number'],
+      'status' => (string) $order['status'],
+      'total_amount' => (float) $order['total_amount'],
+      'created_at' => (string) $order['created_at'],
+      'items' => $itemsByOrder[$id] ?? [],
+    ];
+  }
+
+  return $result;
+}
+
 function httpJson(string $url, bool $allowServerError = false, ?OtlpHttpEmitter $emitter = null, ?array $span = null): array
 {
     global $http_response_header;
@@ -821,23 +1094,24 @@ function renderIndex(): string
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Northstar Market | Observability Demo</title>
+  <title>Northstar Market | Storefront</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,700&family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
   <script src="/rum-config.js"></script>
   <script src="/assets/app.js" defer></script>
   <style>
     :root {
-      --bg-a: #f4ead5;
-      --bg-b: #dce9de;
-      --ink: #1e2932;
+      --bg-a: #f6efde;
+      --bg-b: #d9ebe2;
+      --ink: #19232c;
       --accent: #b85d15;
-      --accent-soft: #f7d9bc;
+      --accent-soft: #f9dfc7;
+      --line: rgba(25, 35, 44, 0.16);
       --ok: #1e6b5c;
-      --card: rgba(255, 255, 255, 0.8);
-      --line: rgba(30, 41, 50, 0.14);
-      --shadow: 0 20px 50px rgba(30, 41, 50, 0.14);
+      --warn: #b42318;
+      --panel: rgba(255, 255, 255, 0.85);
+      --shadow: 0 18px 40px rgba(25, 35, 44, 0.14);
     }
     * { box-sizing: border-box; }
     body {
@@ -846,199 +1120,247 @@ function renderIndex(): string
       color: var(--ink);
       min-height: 100vh;
       background:
-        radial-gradient(1000px 450px at -12% -10%, rgba(184, 93, 21, 0.24), transparent 72%),
-        radial-gradient(900px 450px at 108% 12%, rgba(30, 107, 92, 0.22), transparent 68%),
+        radial-gradient(880px 420px at -10% -10%, rgba(184, 93, 21, 0.22), transparent 72%),
+        radial-gradient(1000px 480px at 108% 8%, rgba(30, 107, 92, 0.24), transparent 74%),
         linear-gradient(145deg, var(--bg-a), var(--bg-b));
     }
     .shell {
-      max-width: 1200px;
+      max-width: 1240px;
       margin: 0 auto;
-      padding: 30px 18px 42px;
+      padding: 26px 18px 44px;
       display: grid;
-      gap: 18px;
+      gap: 16px;
     }
     .hero {
       border: 1px solid var(--line);
-      border-radius: 26px;
-      padding: 24px;
-      background: linear-gradient(130deg, rgba(255,255,255,0.92), rgba(255,255,255,0.72));
+      border-radius: 24px;
+      padding: 20px;
+      background: linear-gradient(140deg, rgba(255,255,255,0.95), rgba(255,255,255,0.78));
       box-shadow: var(--shadow);
+      display: grid;
+      gap: 10px;
+    }
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
     }
     .hero h1 {
-      font-family: Fraunces, serif;
-      font-size: clamp(1.9rem, 4.8vw, 3.4rem);
-      line-height: 0.95;
       margin: 0;
+      font-family: Fraunces, serif;
+      font-size: clamp(2rem, 4.8vw, 3.5rem);
       letter-spacing: -0.03em;
+      line-height: 0.95;
     }
     .hero p {
-      max-width: 72ch;
-      margin: 10px 0 0;
-      line-height: 1.55;
+      margin: 0;
+      max-width: 75ch;
+      line-height: 1.6;
+      color: rgba(25, 35, 44, 0.86);
+    }
+    .user-chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 0.86rem;
+      font-weight: 700;
+      background: #fff;
+    }
+    .hero-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .hero-link {
+      text-decoration: none;
+      color: #fff;
+      background: var(--accent);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-weight: 700;
+      font-size: 0.9rem;
     }
     .layout {
       display: grid;
-      grid-template-columns: 1.4fr 0.9fr;
-      gap: 16px;
+      grid-template-columns: 1.45fr 0.9fr;
+      gap: 14px;
     }
     .panel {
       border: 1px solid var(--line);
-      border-radius: 22px;
-      background: var(--card);
-      box-shadow: 0 12px 26px rgba(30, 41, 50, 0.08);
+      border-radius: 20px;
+      background: var(--panel);
+      box-shadow: 0 12px 22px rgba(25, 35, 44, 0.08);
     }
-    .products { padding: 18px; }
+    .products {
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
     .toolbar {
       display: grid;
       grid-template-columns: 1fr auto;
-      gap: 10px;
-      margin-bottom: 12px;
+      gap: 8px;
     }
     input, select {
       width: 100%;
       border: 1px solid var(--line);
-      border-radius: 12px;
+      border-radius: 11px;
       padding: 10px 12px;
       font: inherit;
       background: #fff;
     }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
       gap: 10px;
     }
     .sku {
       border: 1px solid var(--line);
       border-radius: 14px;
-      padding: 11px;
-      background: rgba(255,255,255,0.9);
-      animation: rise .38s ease both;
+      overflow: hidden;
+      background: #fff;
+      display: grid;
+      animation: rise .3s ease both;
+    }
+    .sku-img {
+      width: 100%;
+      aspect-ratio: 16 / 11;
+      object-fit: cover;
+      display: block;
+    }
+    .sku-body {
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: #62300d;
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      font-weight: 700;
+      text-transform: capitalize;
     }
     .sku h3 {
       margin: 0;
       font-size: 1rem;
     }
     .sku p {
-      margin: 7px 0;
+      margin: 0;
       font-size: 0.88rem;
-      color: rgba(30, 41, 50, 0.82);
-      min-height: 34px;
-    }
-    .row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 10px;
-    }
-    .badge {
-      font-size: 0.76rem;
-      letter-spacing: 0.02em;
-      padding: 3px 8px;
-      border-radius: 999px;
-      background: var(--accent-soft);
-      color: #5f3110;
+      color: rgba(25, 35, 44, 0.8);
+      min-height: 38px;
     }
     button {
-      border: none;
-      cursor: pointer;
-      border-radius: 11px;
+      border: 0;
+      border-radius: 10px;
       padding: 9px 11px;
+      cursor: pointer;
       font: inherit;
       font-weight: 700;
       transition: transform .15s ease, filter .2s ease;
     }
-    button:hover { transform: translateY(-1px); filter: brightness(0.98); }
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
     .btn-main { background: var(--accent); color: #fff; }
     .btn-sub { background: #1f685a; color: #fff; }
     .btn-clear { background: #ebebeb; color: #242424; }
-    .btn-alert { background: #b42318; color: #fff; }
-    .auth-card {
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: #fff;
-      padding: 12px;
+    .btn-alert { background: var(--warn); color: #fff; }
+    .side {
+      padding: 14px;
       display: grid;
       gap: 10px;
+      align-content: start;
     }
-    .auth-card h3 {
+    .title {
       margin: 0;
       font-family: Fraunces, serif;
-      font-size: 1.1rem;
-    }
-    .auth-form {
-      display: grid;
-      gap: 8px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px;
-      background: rgba(244, 234, 213, 0.25);
-    }
-    .auth-form label {
-      font-size: 0.78rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-    }
-    .auth-user {
-      border: 1px dashed var(--line);
-      border-radius: 12px;
-      padding: 10px;
-      background: #fdfdfd;
-      display: grid;
+      font-size: 1.35rem;
+      display: flex;
+      align-items: center;
       gap: 8px;
     }
-    .auth-status {
-      margin: 0;
-      font-size: 0.86rem;
-      color: rgba(30, 41, 50, 0.8);
-    }
-    .side {
-      padding: 16px;
-      display: grid;
-      gap: 12px;
-      align-content: start;
+    .pill {
+      border-radius: 999px;
+      font-size: 0.72rem;
+      background: rgba(30, 107, 92, 0.2);
+      color: var(--ok);
+      padding: 2px 8px;
     }
     .kpi {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(3, minmax(0,1fr));
       gap: 8px;
     }
     .kpi > div {
       border: 1px solid var(--line);
       border-radius: 12px;
       background: #fff;
-      padding: 10px;
       text-align: center;
+      padding: 9px;
     }
     .kpi strong {
       display: block;
       font-size: 1.1rem;
-      margin-bottom: 3px;
+      margin-bottom: 2px;
     }
-    .checkout {
+    .section-box {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      padding: 10px;
       display: grid;
       gap: 8px;
     }
-    .log {
-      background: #111820;
-      color: #e8edf2;
-      border-radius: 14px;
-      min-height: 210px;
-      max-height: 280px;
-      overflow: auto;
-      padding: 11px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    .mini-title {
+      margin: 0;
       font-size: 0.82rem;
-      line-height: 1.4;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(25,35,44,0.7);
     }
-    .pill {
-      display: inline-block;
-      margin-left: 6px;
-      border-radius: 999px;
-      font-size: 0.72rem;
-      padding: 2px 8px;
-      background: rgba(30, 107, 92, 0.2);
-      color: var(--ok);
+    .cart-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      background: #fff;
+    }
+    .checkout {
+      display: grid;
+      gap: 7px;
+    }
+    .rec-list, .orders-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 6px;
+      font-size: 0.9rem;
+    }
+    .log {
+      background: #0f1720;
+      color: #e4ecf4;
+      border-radius: 12px;
+      min-height: 170px;
+      max-height: 230px;
+      overflow: auto;
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.8rem;
+      line-height: 1.35;
     }
     @keyframes rise {
       from { opacity: 0; transform: translateY(8px); }
@@ -1046,19 +1368,24 @@ function renderIndex(): string
     }
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
-      .kpi { grid-template-columns: repeat(3, minmax(0,1fr)); }
+      .hero-top { align-items: flex-start; }
     }
   </style>
 </head>
 <body>
   <div class="shell">
     <section class="hero">
-      <h1>Northstar Market</h1>
-      <p>
-        Demo webshop die bewust veel traffic en bottlenecks maakt voor OpenObserve.
-        Elke actie triggert backend-calls naar MySQL, PostgreSQL, Redis, Node, Python en Java,
-        zodat RUM, traces, metrics en logs direct bruikbaar zijn.
-      </p>
+      <div class="hero-top">
+        <div>
+          <h1>Northstar Market</h1>
+          <p>Demo-webshop met echte login, orders en observability data. Je kunt alleen afrekenen als je ingelogd bent.</p>
+        </div>
+        <div class="hero-actions">
+          <span class="user-chip" id="hero-user">Niet ingelogd</span>
+          <a class="hero-link" id="auth-link" href="/auth">Inloggen / Registreren</a>
+          <button class="btn-clear" id="btn-logout" hidden>Uitloggen</button>
+        </div>
+      </div>
     </section>
 
     <section class="layout">
@@ -1076,29 +1403,7 @@ function renderIndex(): string
       </article>
 
       <aside class="panel side">
-        <h2 style="margin: 0; font-family: Fraunces, serif;">Winkelwagen <span class="pill">RUM heavy</span></h2>
-
-        <div class="auth-card">
-          <h3>Account</h3>
-          <div id="auth-guest" style="display:grid; gap:8px;">
-            <form id="form-register" class="auth-form">
-              <label for="register-email">Registreren</label>
-              <input id="register-email" name="email" type="email" placeholder="jij@voorbeeld.nl" required>
-              <input id="register-password" name="password" type="password" placeholder="Wachtwoord (min. 8 tekens)" minlength="8" required>
-              <button class="btn-main" type="submit">Register</button>
-            </form>
-            <form id="form-login" class="auth-form">
-              <label for="login-email">Inloggen</label>
-              <input id="login-email" name="email" type="email" placeholder="jij@voorbeeld.nl" required>
-              <input id="login-password" name="password" type="password" placeholder="Wachtwoord" required>
-              <button class="btn-sub" type="submit">Inloggen</button>
-            </form>
-          </div>
-          <div id="auth-user" class="auth-user" hidden>
-            <p class="auth-status">Ingelogd als <strong id="auth-email">-</strong></p>
-            <button class="btn-clear" id="btn-logout">Uitloggen</button>
-          </div>
-        </div>
+        <h2 class="title">Winkelwagen <span class="pill">Live checkout</span></h2>
 
         <div class="kpi">
           <div><strong id="kpi-items">0</strong><span>Items</span></div>
@@ -1106,7 +1411,10 @@ function renderIndex(): string
           <div><strong id="kpi-lat">-</strong><span>API ms</span></div>
         </div>
 
-        <div id="cart"></div>
+        <div class="section-box">
+          <p class="mini-title">Cart</p>
+          <div id="cart"></div>
+        </div>
 
         <div class="checkout">
           <button class="btn-main" id="btn-summary">Ververs aanbevelingen</button>
@@ -1115,39 +1423,59 @@ function renderIndex(): string
           <button class="btn-alert" id="btn-alert">Trigger alert</button>
         </div>
 
-        <div class="log" id="log">Start webshop-simulatie: voeg producten toe en klik op acties.</div>
+        <div class="section-box">
+          <p class="mini-title">Aanbevelingen</p>
+          <ul class="rec-list" id="recs"><li>Nog geen aanbevelingen geladen.</li></ul>
+        </div>
+
+        <div class="section-box">
+          <p class="mini-title">Mijn bestellingen</p>
+          <ul class="orders-list" id="orders"><li>Log in om je bestellingen te zien.</li></ul>
+        </div>
+
+        <div class="log" id="log">Start webshop-simulatie: voeg producten toe en rond een bestelling af.</div>
       </aside>
     </section>
   </div>
 
   <script>
     const products = [
-      { sku: 'SKU-100', name: 'PHP Hoodie', category: 'apparel', price: 59.99, desc: 'Warm en zacht, met mini-logo op de mouw.' },
-      { sku: 'SKU-101', name: 'Node Mug', category: 'accessories', price: 12.49, desc: 'Keramische mok voor deploy-dagen.' },
-      { sku: 'SKU-102', name: 'Python Notebook', category: 'stationery', price: 9.95, desc: 'Lijnpapier voor design en SQL-notes.' },
-      { sku: 'SKU-103', name: 'Java Sticker Pack', category: 'accessories', price: 4.99, desc: 'Retro stickers voor je laptop.' },
-      { sku: 'SKU-104', name: 'OTEL Cap', category: 'apparel', price: 19.99, desc: 'Lichte cap met trace icon.' },
-      { sku: 'SKU-105', name: 'Redis Socks', category: 'apparel', price: 14.95, desc: 'Snelle voeten voor snelle cache hits.' },
+      { sku: 'SKU-100', name: 'PHP Hoodie', category: 'apparel', price: 59.99, desc: 'Warm en zacht, met mini-logo op de mouw.', image: 'https://picsum.photos/id/1011/640/440' },
+      { sku: 'SKU-101', name: 'Node Mug', category: 'accessories', price: 12.49, desc: 'Keramische mok voor deploy-dagen.', image: 'https://picsum.photos/id/1062/640/440' },
+      { sku: 'SKU-102', name: 'Python Notebook', category: 'stationery', price: 9.95, desc: 'Lijnpapier voor design en SQL-notes.', image: 'https://picsum.photos/id/180/640/440' },
+      { sku: 'SKU-103', name: 'Java Sticker Pack', category: 'accessories', price: 4.99, desc: 'Retro stickers voor je laptop.', image: 'https://picsum.photos/id/30/640/440' },
+      { sku: 'SKU-104', name: 'OTEL Cap', category: 'apparel', price: 19.99, desc: 'Lichte cap met trace icon.', image: 'https://picsum.photos/id/64/640/440' },
+      { sku: 'SKU-105', name: 'Redis Socks', category: 'apparel', price: 14.95, desc: 'Snelle voeten voor snelle cache hits.', image: 'https://picsum.photos/id/21/640/440' },
     ];
 
     const cart = new Map();
+    let currentUser = null;
     const grid = document.getElementById('grid');
     const cartBox = document.getElementById('cart');
+    const recsBox = document.getElementById('recs');
+    const ordersBox = document.getElementById('orders');
     const logBox = document.getElementById('log');
+    const heroUser = document.getElementById('hero-user');
+    const authLink = document.getElementById('auth-link');
+    const logoutButton = document.getElementById('btn-logout');
+    const checkoutButton = document.getElementById('btn-checkout');
     const kpiItems = document.getElementById('kpi-items');
     const kpiSubtotal = document.getElementById('kpi-subtotal');
     const kpiLat = document.getElementById('kpi-lat');
     const searchInput = document.getElementById('search');
     const categoryInput = document.getElementById('category');
-    const authGuest = document.getElementById('auth-guest');
-    const authUser = document.getElementById('auth-user');
-    const authEmail = document.getElementById('auth-email');
-    const registerForm = document.getElementById('form-register');
-    const loginForm = document.getElementById('form-login');
-    const logoutButton = document.getElementById('btn-logout');
 
     function euro(value) {
       return Number(value).toFixed(2);
+    }
+
+    function appendLog(title, payload) {
+      const stamp = new Date().toISOString();
+      const lines = [`[${stamp}] ${title}`];
+      if (payload !== undefined) {
+        lines.push(JSON.stringify(payload, null, 2));
+      }
+      logBox.textContent = `${lines.join('\n')}\n\n${logBox.textContent}`.slice(0, 9000);
     }
 
     function totalItems() {
@@ -1166,13 +1494,8 @@ function renderIndex(): string
       return total;
     }
 
-    function appendLog(title, payload) {
-      const stamp = new Date().toISOString();
-      const lines = [`[${stamp}] ${title}`];
-      if (payload !== undefined) {
-        lines.push(JSON.stringify(payload, null, 2));
-      }
-      logBox.textContent = `${lines.join('\n')}\n\n${logBox.textContent}`.slice(0, 7000);
+    function cartPayload() {
+      return [...cart.entries()].filter(([, qty]) => qty > 0).map(([sku, quantity]) => ({ sku, quantity }));
     }
 
     function setKpis(latencyMs) {
@@ -1184,23 +1507,23 @@ function renderIndex(): string
     }
 
     function renderCart() {
-      const entries = [...cart.entries()].filter(([, qty]) => qty > 0);
+      const entries = cartPayload();
       if (entries.length === 0) {
-        cartBox.innerHTML = '<p style="margin:0;color:rgba(30,41,50,.7)">Nog geen items in je winkelwagen.</p>';
+        cartBox.innerHTML = '<p style="margin:0;color:rgba(25,35,44,.7)">Nog geen items in je winkelwagen.</p>';
         setKpis();
         return;
       }
 
-      cartBox.innerHTML = entries.map(([sku, qty]) => {
+      cartBox.innerHTML = entries.map(({ sku, quantity }) => {
         const item = products.find((p) => p.sku === sku);
-        const lineTotal = item ? item.price * qty : 0;
+        const lineTotal = item ? item.price * quantity : 0;
         return `
-          <div style="border:1px solid var(--line);border-radius:11px;padding:8px;margin-bottom:8px;background:#fff;">
-            <div style="display:flex;justify-content:space-between;gap:8px;">
+          <div class="cart-item">
+            <div>
               <strong>${item ? item.name : sku}</strong>
-              <span>x${qty}</span>
+              <div style="font-size:.8rem;color:rgba(25,35,44,.68)">x${quantity}</div>
             </div>
-            <div style="font-size:.85rem;color:rgba(30,41,50,.74)">EUR ${euro(lineTotal)}</div>
+            <strong>EUR ${euro(lineTotal)}</strong>
           </div>
         `;
       }).join('');
@@ -1211,6 +1534,7 @@ function renderIndex(): string
     function renderGrid() {
       const term = searchInput.value.trim().toLowerCase();
       const category = categoryInput.value;
+
       const filtered = products.filter((item) => {
         const inCategory = category === 'all' || item.category === category;
         const inTerm = term === '' || `${item.name} ${item.category} ${item.sku}`.toLowerCase().includes(term);
@@ -1219,14 +1543,17 @@ function renderIndex(): string
 
       grid.innerHTML = filtered.map((item) => `
         <article class="sku">
-          <div class="row">
-            <h3>${item.name}</h3>
-            <span class="badge">${item.category}</span>
-          </div>
-          <p>${item.desc}</p>
-          <div class="row">
-            <strong>EUR ${euro(item.price)}</strong>
-            <button class="btn-main" data-sku="${item.sku}">Toevoegen</button>
+          <img class="sku-img" src="${item.image}" alt="${item.name}">
+          <div class="sku-body">
+            <div class="row">
+              <h3>${item.name}</h3>
+              <span class="badge">${item.category}</span>
+            </div>
+            <p>${item.desc}</p>
+            <div class="row">
+              <strong>EUR ${euro(item.price)}</strong>
+              <button class="btn-main" data-sku="${item.sku}">Toevoegen</button>
+            </div>
           </div>
         </article>
       `).join('');
@@ -1241,27 +1568,408 @@ function renderIndex(): string
       });
     }
 
-    async function callApi(path, title) {
-      const start = performance.now();
+    async function requestJson(path, method = 'GET', body) {
+      const response = await fetch(path, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      let payload = {};
       try {
-        const response = await fetch(path, { method: 'GET' });
-        const data = await response.json();
-        const latency = performance.now() - start;
-        setKpis(latency);
-        if (path === '/api/checkout') {
-          const orderId = data && data.order && data.order.order_id ? data.order.order_id : 'UNKNOWN';
-          const state = data && data.order && data.order.status ? data.order.status : 'confirmed';
-          appendLog('checkout:order-confirmed', { order_id: orderId, status: state, trace_id: response.headers.get('x-trace-id') || '' });
-        }
-        appendLog(`${title} (${response.status})`, data);
-      } catch (error) {
-        const latency = performance.now() - start;
-        setKpis(latency);
-        appendLog(`${title} (network-fail)`, { error: error.message });
+        payload = await response.json();
+      } catch (_error) {
+        payload = {};
+      }
+
+      if (!response.ok) {
+        const message = payload && payload.error ? payload.error : `Request failed (${response.status})`;
+        throw new Error(message);
+      }
+
+      return { payload, status: response.status };
+    }
+
+    function extractRecommendations(summary) {
+      const source = summary && summary.recommendations ? summary.recommendations : {};
+      if (Array.isArray(source.items)) {
+        return source.items;
+      }
+      if (source.payload && Array.isArray(source.payload.items)) {
+        return source.payload.items;
+      }
+      return [];
+    }
+
+    function renderRecommendations(items) {
+      if (!items || items.length === 0) {
+        recsBox.innerHTML = '<li>Geen aanbevelingen beschikbaar.</li>';
+        return;
+      }
+
+      recsBox.innerHTML = items.slice(0, 6).map((item) => `
+        <li style="display:flex;justify-content:space-between;gap:8px;border:1px solid var(--line);border-radius:8px;padding:7px;">
+          <span>${item.sku || 'SKU'} <small style="color:rgba(25,35,44,.65)">${item.tier || ''}</small></span>
+          <strong>${Number(item.score || 0).toFixed(2)}</strong>
+        </li>
+      `).join('');
+    }
+
+    function renderOrders(orders) {
+      if (!currentUser) {
+        ordersBox.innerHTML = '<li>Log in om je bestellingen te zien.</li>';
+        return;
+      }
+      if (!orders || orders.length === 0) {
+        ordersBox.innerHTML = '<li>Nog geen bestellingen geplaatst.</li>';
+        return;
+      }
+
+      ordersBox.innerHTML = orders.slice(0, 5).map((order) => `
+        <li style="border:1px solid var(--line);border-radius:8px;padding:8px;">
+          <div style="display:flex;justify-content:space-between;gap:8px;">
+            <strong>${order.order_id}</strong>
+            <span>${order.status}</span>
+          </div>
+          <div style="font-size:.82rem;color:rgba(25,35,44,.72)">EUR ${euro(order.total_amount)} • ${new Date(order.created_at).toLocaleString()}</div>
+        </li>
+      `).join('');
+    }
+
+    function applyAuthState(data) {
+      if (!data || !data.authenticated || !data.user) {
+        currentUser = null;
+        heroUser.textContent = 'Niet ingelogd';
+        authLink.hidden = false;
+        logoutButton.hidden = true;
+        checkoutButton.disabled = true;
+        checkoutButton.title = 'Log eerst in om te bestellen';
+        renderOrders([]);
+        return;
+      }
+
+      currentUser = data.user;
+      heroUser.textContent = `Ingelogd als ${data.user.email}`;
+      authLink.hidden = true;
+      logoutButton.hidden = false;
+      checkoutButton.disabled = false;
+      checkoutButton.title = '';
+
+      if (typeof window.__setOpenObserveUser === 'function') {
+        window.__setOpenObserveUser({
+          id: String(data.user.id || data.user.email),
+          name: data.user.email,
+          email: data.user.email,
+        });
       }
     }
 
-    async function requestJson(path, method, body) {
+    async function refreshAuthState() {
+      try {
+        const { payload } = await requestJson('/api/me');
+        applyAuthState(payload);
+      } catch (error) {
+        appendLog('auth:state-failed', { error: error.message });
+      }
+    }
+
+    async function refreshOrders() {
+      if (!currentUser) {
+        renderOrders([]);
+        return;
+      }
+
+      try {
+        const { payload } = await requestJson('/api/orders');
+        renderOrders(payload.orders || []);
+      } catch (error) {
+        appendLog('orders:load-failed', { error: error.message });
+      }
+    }
+
+    async function refreshSummary(title = 'summary:refresh') {
+      const start = performance.now();
+      try {
+        const { payload, status } = await requestJson('/api/summary');
+        setKpis(performance.now() - start);
+        renderRecommendations(extractRecommendations(payload));
+        appendLog(`${title} (${status})`, {
+          component_errors: payload.component_errors,
+          degraded: payload.degraded,
+          recommendations: extractRecommendations(payload).length,
+        });
+      } catch (error) {
+        setKpis(performance.now() - start);
+        appendLog(`${title} (failed)`, { error: error.message });
+      }
+    }
+
+    async function checkoutOrder() {
+      if (!currentUser) {
+        appendLog('checkout:blocked', { reason: 'not-authenticated' });
+        window.location.href = '/auth?next=/';
+        return;
+      }
+
+      const items = cartPayload();
+      if (items.length === 0) {
+        appendLog('checkout:blocked', { reason: 'empty-cart' });
+        return;
+      }
+
+      const start = performance.now();
+      try {
+        const { payload } = await requestJson('/api/checkout', 'POST', { items });
+        setKpis(performance.now() - start);
+        const order = payload.order || {};
+        appendLog('checkout:order-confirmed', {
+          order_id: order.order_id,
+          status: order.status,
+          total_amount: order.total_amount,
+          user_email: currentUser.email,
+        });
+        cart.clear();
+        renderCart();
+        await refreshOrders();
+        renderRecommendations(extractRecommendations(payload));
+      } catch (error) {
+        setKpis(performance.now() - start);
+        appendLog('checkout:failed', { error: error.message });
+      }
+    }
+
+    async function triggerAlertBurst() {
+      const alertButton = document.getElementById('btn-alert');
+      const burstSize = 8;
+      alertButton.disabled = true;
+      alertButton.textContent = 'Triggering...';
+
+      const jobs = Array.from({ length: burstSize }, () =>
+        fetch('/api/error', { method: 'GET' })
+          .then((response) => response.status)
+          .catch(() => 0)
+      );
+
+      const statuses = await Promise.all(jobs);
+      const statusCounts = statuses.reduce((acc, status) => {
+        const key = String(status);
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+      }, {});
+
+      appendLog('manual:alert-burst', { status_counts: statusCounts, requests: burstSize });
+      alertButton.disabled = false;
+      alertButton.textContent = 'Trigger alert';
+    }
+
+    document.getElementById('btn-summary').addEventListener('click', () => {
+      refreshSummary('manual:summary');
+    });
+
+    document.getElementById('btn-checkout').addEventListener('click', () => {
+      checkoutOrder();
+    });
+
+    document.getElementById('btn-chaos').addEventListener('click', () => {
+      fetch('/api/error').catch(() => undefined);
+      appendLog('manual:error-path', { fired: true });
+    });
+
+    document.getElementById('btn-alert').addEventListener('click', () => {
+      triggerAlertBurst();
+    });
+
+    logoutButton.addEventListener('click', async () => {
+      try {
+        await requestJson('/api/logout', 'POST');
+        appendLog('auth:logout-success', {});
+        applyAuthState({ authenticated: false });
+      } catch (error) {
+        appendLog('auth:logout-failed', { error: error.message });
+      }
+    });
+
+    let filterTimer;
+    function triggerBrowseTelemetry() {
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        refreshSummary('browse:summary-refresh');
+      }, 240);
+    }
+
+    searchInput.addEventListener('input', () => {
+      renderGrid();
+      triggerBrowseTelemetry();
+    });
+
+    categoryInput.addEventListener('change', () => {
+      renderGrid();
+      triggerBrowseTelemetry();
+    });
+
+    renderGrid();
+    renderCart();
+    refreshAuthState().then(() => refreshOrders());
+    refreshSummary('startup:summary');
+  </script>
+</body>
+</html>
+HTML;
+}
+
+function renderAuthPage(): string
+{
+  return <<<'HTML'
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Northstar Market | Inloggen</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <script src="/rum-config.js"></script>
+  <script src="/assets/app.js" defer></script>
+  <style>
+    :root {
+      --line: rgba(25, 35, 44, 0.16);
+      --accent: #b85d15;
+      --ok: #1f685a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Manrope, sans-serif;
+      background: linear-gradient(140deg, #f6efde, #d9ebe2);
+      color: #19232c;
+      display: grid;
+      place-items: center;
+      padding: 14px;
+    }
+    .auth-shell {
+      width: min(920px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: rgba(255,255,255,0.94);
+      box-shadow: 0 20px 45px rgba(25,35,44,0.14);
+      padding: 20px;
+      display: grid;
+      gap: 14px;
+    }
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-family: Fraunces, serif;
+      font-size: clamp(1.8rem, 4vw, 2.8rem);
+      letter-spacing: -0.03em;
+    }
+    .home-link {
+      text-decoration: none;
+      font-weight: 700;
+      color: #fff;
+      background: #19232c;
+      border-radius: 10px;
+      padding: 8px 12px;
+    }
+    .cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    form {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      background: #fff;
+      display: grid;
+      gap: 8px;
+    }
+    label {
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(25,35,44,.74);
+    }
+    input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      padding: 10px 11px;
+      font: inherit;
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+    }
+    .btn-register { background: var(--accent); color: #fff; }
+    .btn-login { background: var(--ok); color: #fff; }
+    .status {
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: #fdfdfd;
+      font-size: 0.9rem;
+    }
+    @media (max-width: 860px) {
+      .cols { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="auth-shell">
+    <div class="top">
+      <h1>Inloggen of registreren</h1>
+      <a class="home-link" href="/">Terug naar shop</a>
+    </div>
+
+    <p style="margin:0;color:rgba(25,35,44,.82)">Na inloggen kun je meteen producten bestellen. Je e-mailadres wordt expres in telemetry meegestuurd voor SDR/redactie-tests.</p>
+
+    <section class="cols">
+      <form id="register-form">
+        <strong>Nieuw account</strong>
+        <label for="register-email">E-mailadres</label>
+        <input id="register-email" type="email" required placeholder="jij@voorbeeld.nl">
+        <label for="register-password">Wachtwoord</label>
+        <input id="register-password" type="password" minlength="8" required placeholder="Minimaal 8 tekens">
+        <button class="btn-register" type="submit">Account aanmaken</button>
+      </form>
+
+      <form id="login-form">
+        <strong>Bestaand account</strong>
+        <label for="login-email">E-mailadres</label>
+        <input id="login-email" type="email" required placeholder="jij@voorbeeld.nl">
+        <label for="login-password">Wachtwoord</label>
+        <input id="login-password" type="password" required placeholder="Wachtwoord">
+        <button class="btn-login" type="submit">Inloggen</button>
+      </form>
+    </section>
+
+    <div class="status" id="auth-status">Nog niet ingelogd.</div>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const nextPath = params.get('next') || '/';
+    const statusBox = document.getElementById('auth-status');
+
+    function setStatus(message) {
+      statusBox.textContent = message;
+    }
+
+    async function requestJson(path, method = 'GET', body) {
       const response = await fetch(path, {
         method,
         headers: { 'Content-Type': 'application/json' },
@@ -1283,146 +1991,57 @@ function renderIndex(): string
       return payload;
     }
 
-    function applyAuthState(authResponse) {
-      const authenticated = Boolean(authResponse && authResponse.authenticated && authResponse.user);
-      if (!authenticated) {
-        authGuest.hidden = false;
-        authUser.hidden = true;
-        authEmail.textContent = '-';
-        return;
-      }
-
-      const email = authResponse.user.email || '';
-      authGuest.hidden = true;
-      authUser.hidden = false;
-      authEmail.textContent = email;
-
-      if (typeof window.__setOpenObserveUser === 'function' && email) {
-        window.__setOpenObserveUser({
-          id: String(authResponse.user.id || email),
-          name: email,
-          email,
-        });
-      }
-    }
-
-    async function refreshAuthState() {
+    async function refreshCurrentUser() {
       try {
-        const payload = await requestJson('/api/me', 'GET');
-        applyAuthState(payload);
-      } catch (error) {
-        appendLog('auth:state-failed', { error: error.message });
+        const payload = await requestJson('/api/me');
+        if (payload.authenticated && payload.user) {
+          setStatus(`Ingelogd als ${payload.user.email}. Je wordt nu doorgestuurd...`);
+
+          if (typeof window.__setOpenObserveUser === 'function') {
+            window.__setOpenObserveUser({
+              id: String(payload.user.id || payload.user.email),
+              name: payload.user.email,
+              email: payload.user.email,
+            });
+          }
+
+          setTimeout(() => {
+            window.location.href = nextPath;
+          }, 700);
+          return;
+        }
+      } catch (_error) {
+        // ignore and let forms handle explicit actions
       }
     }
 
-    async function triggerAlertBurst() {
-      const alertButton = document.getElementById('btn-alert');
-      const burstSize = 8;
-      alertButton.disabled = true;
-      alertButton.textContent = 'Triggering...';
-
-      appendLog('manual:alert-burst:start', { requests: burstSize, endpoint: '/api/error' });
-
-      const jobs = Array.from({ length: burstSize }, (_, index) =>
-        fetch('/api/error', { method: 'GET' })
-          .then((response) => ({ ok: response.ok, status: response.status, index }))
-          .catch((error) => ({ ok: false, status: 0, index, error: error.message }))
-      );
-
-      const results = await Promise.all(jobs);
-      const statusCounts = results.reduce((acc, result) => {
-        const key = String(result.status);
-        acc[key] = (acc[key] || 0) + 1;
-        return acc;
-      }, {});
-
-      appendLog('manual:alert-burst:done', {
-        requests: burstSize,
-        status_counts: statusCounts,
-      });
-
-      alertButton.disabled = false;
-      alertButton.textContent = 'Trigger alert';
-    }
-
-    let filterTimer;
-    function triggerBrowseTelemetry() {
-      clearTimeout(filterTimer);
-      filterTimer = setTimeout(() => {
-        callApi('/api/summary', 'browse:summary-refresh');
-      }, 240);
-    }
-
-    document.getElementById('btn-summary').addEventListener('click', () => {
-      callApi('/api/summary', 'manual:summary');
-    });
-
-    document.getElementById('btn-checkout').addEventListener('click', () => {
-      callApi('/api/checkout', 'manual:checkout');
-    });
-
-    document.getElementById('btn-chaos').addEventListener('click', () => {
-      callApi('/api/error', 'manual:error-path');
-    });
-
-    document.getElementById('btn-alert').addEventListener('click', () => {
-      triggerAlertBurst();
-    });
-
-    registerForm.addEventListener('submit', async (event) => {
+    document.getElementById('register-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const email = document.getElementById('register-email').value.trim();
       const password = document.getElementById('register-password').value;
-
       try {
         const payload = await requestJson('/api/register', 'POST', { email, password });
-        appendLog('auth:register-success', { email });
-        applyAuthState({ authenticated: true, user: payload.user });
-        registerForm.reset();
+        setStatus(`Account aangemaakt voor ${payload.user.email}.`);
+        await refreshCurrentUser();
       } catch (error) {
-        appendLog('auth:register-failed', { email, error: error.message });
+        setStatus(`Registreren mislukt: ${error.message}`);
       }
     });
 
-    loginForm.addEventListener('submit', async (event) => {
+    document.getElementById('login-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const email = document.getElementById('login-email').value.trim();
       const password = document.getElementById('login-password').value;
-
       try {
         const payload = await requestJson('/api/login', 'POST', { email, password });
-        appendLog('auth:login-success', { email });
-        applyAuthState({ authenticated: true, user: payload.user });
-        loginForm.reset();
+        setStatus(`Welkom terug, ${payload.user.email}.`);
+        await refreshCurrentUser();
       } catch (error) {
-        appendLog('auth:login-failed', { email, error: error.message });
+        setStatus(`Inloggen mislukt: ${error.message}`);
       }
     });
 
-    logoutButton.addEventListener('click', async () => {
-      try {
-        await requestJson('/api/logout', 'POST');
-        appendLog('auth:logout-success', {});
-        applyAuthState({ authenticated: false });
-      } catch (error) {
-        appendLog('auth:logout-failed', { error: error.message });
-      }
-    });
-
-    searchInput.addEventListener('input', () => {
-      renderGrid();
-      triggerBrowseTelemetry();
-    });
-
-    categoryInput.addEventListener('change', () => {
-      renderGrid();
-      triggerBrowseTelemetry();
-    });
-
-    renderGrid();
-    renderCart();
-    refreshAuthState();
-    callApi('/api/summary', 'startup:summary');
+    refreshCurrentUser();
   </script>
 </body>
 </html>
