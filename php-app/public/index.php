@@ -353,52 +353,72 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
 {
     global $requestId;
 
-    $mysqlProbe = probeStep('mysql', fn (array $_span) => queryMysql(), $logger, $emitter, $rootSpan, [
+    $mysqlProbe = probeStep('mysql', fn (array $_span, array $_appSpan) => queryMysql(), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'mysql',
       'db.name' => 'catalog',
       'server.address' => getenv('MYSQL_HOST') ?: 'mysql',
+    ], [
+      'app.operation' => 'queryMysql',
+      'code.function.name' => 'queryMysql',
+      'code.file.path' => __FILE__,
     ]);
-    $mysqlShadowProbe = probeStep('mysql_shadow', fn (array $_span) => queryMysql(), $logger, $emitter, $rootSpan, [
+    $mysqlShadowProbe = probeStep('mysql_shadow', fn (array $_span, array $_appSpan) => queryMysql(), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'mysql',
       'db.name' => 'catalog',
       'server.address' => getenv('MYSQL_HOST') ?: 'mysql',
+    ], [
+      'app.operation' => 'queryMysql',
+      'code.function.name' => 'queryMysql',
+      'code.file.path' => __FILE__,
     ]);
-    $postgresProbe = probeStep('postgres', fn (array $_span) => queryPostgres(), $logger, $emitter, $rootSpan, [
+    $postgresProbe = probeStep('postgres', fn (array $_span, array $_appSpan) => queryPostgres(), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'postgresql',
       'db.name' => 'recommendations',
       'server.address' => getenv('POSTGRES_HOST') ?: 'postgres',
+    ], [
+      'app.operation' => 'queryPostgres',
+      'code.function.name' => 'queryPostgres',
+      'code.file.path' => __FILE__,
     ]);
-    $postgresShadowProbe = probeStep('postgres_shadow', fn (array $_span) => queryPostgres(), $logger, $emitter, $rootSpan, [
+    $postgresShadowProbe = probeStep('postgres_shadow', fn (array $_span, array $_appSpan) => queryPostgres(), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'postgresql',
       'db.name' => 'recommendations',
       'server.address' => getenv('POSTGRES_HOST') ?: 'postgres',
+    ], [
+      'app.operation' => 'queryPostgres',
+      'code.function.name' => 'queryPostgres',
+      'code.file.path' => __FILE__,
     ]);
-    $redisProbe = probeStep('redis', fn (array $_span) => queryRedis(), $logger, $emitter, $rootSpan, [
+    $redisProbe = probeStep('redis', fn (array $_span, array $_appSpan) => queryRedis(), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'cache',
       'db.system' => 'redis',
       'server.address' => getenv('REDIS_HOST') ?: 'redis',
+    ], [
+      'app.operation' => 'queryRedis',
+      'code.function.name' => 'queryRedis',
+      'code.file.path' => __FILE__,
     ]);
 
-    $catalogProbe = probeStep('node_catalog', fn (array $span) => httpJson((getenv('NODE_SERVICE_URL') ?: 'http://node-catalog:3000') . '/inventory', true, $emitter, $span), $logger, $emitter, $rootSpan, [
+    $catalogProbe = probeStep('node_catalog', fn (array $span, array $_appSpan) => httpJson((getenv('NODE_SERVICE_URL') ?: 'http://node-catalog:3000') . '/inventory', true, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'application',
       'peer.service' => 'node-catalog',
       'http.route' => '/inventory',
     ]);
-    $recommendationsProbe = probeStep('python_recommendations', fn (array $span) => httpJson((getenv('PYTHON_SERVICE_URL') ?: 'http://python-recommendation:8000') . '/recommendations?user_id=1', true, $emitter, $span), $logger, $emitter, $rootSpan, [
+    $recommendationsProbe = probeStep('python_recommendations', fn (array $span, array $_appSpan) => httpJson((getenv('PYTHON_SERVICE_URL') ?: 'http://python-recommendation:8000') . '/recommendations?user_id=1', true, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'application',
       'peer.service' => 'python-recommendation',
       'http.route' => '/recommendations',
     ]);
-    $checkoutProbe = probeStep('java_checkout', fn (array $span) => httpJson((getenv('JAVA_SERVICE_URL') ?: 'http://java-checkout:8081') . '/quote', true, $emitter, $span), $logger, $emitter, $rootSpan, [
+    $checkoutProbe = probeStep('java_checkout', fn (array $span, array $_appSpan) => httpJson((getenv('JAVA_SERVICE_URL') ?: 'http://java-checkout:8081') . '/quote', true, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'application',
       'peer.service' => 'java-checkout',
       'http.route' => '/quote',
@@ -452,37 +472,59 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
     ];
 }
 
-function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan, array $extraAttributes = []): array
+function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan, array $extraAttributes = [], array $appAttributes = []): array
 {
   global $requestId;
 
+    $appSpan = $emitter->startSpan('php.application.' . $name, array_merge([
+        'component.name' => $name,
+        'component.type' => 'application_logic',
+        'component.layer' => 'application',
+        'request.id' => $requestId,
+    ], $appAttributes), $rootSpan, 1);
     $start = microtime(true);
     $span = $emitter->startSpan('php.component.' . $name, [
         'component.name' => $name,
         'component.type' => 'dependency',
     'request.id' => $requestId,
-    ], $rootSpan, 3);
+    ], $appSpan, 3);
 
     try {
-    $data = $operation($span);
+    $data = $operation($span, $appSpan);
 
         $emitter->exportTrace($emitter->finishSpan($span, array_merge([
             'component.name' => $name,
             'component.ok' => true,
             'duration_ms' => elapsedMs($start),
         ], $extraAttributes)));
+        $emitter->exportTrace($emitter->finishSpan($appSpan, [
+            'component.name' => $name,
+            'component.ok' => true,
+            'root_cause.layer' => 'none',
+            'root_cause.reason' => 'no_error',
+            'duration_ms' => elapsedMs($start),
+        ]));
 
         return ['ok' => true, 'data' => $data];
     } catch (Throwable $error) {
         $message = $error->getMessage();
       $errorContext = describeThrowable($error);
+      $classification = classifyProbeFailure($name, $extraAttributes, $errorContext);
 
         $emitter->exportTrace($emitter->finishSpan($span, array_merge([
             'component.name' => $name,
             'component.ok' => false,
             'duration_ms' => elapsedMs($start),
             'error' => true,
+            'root_cause.layer' => 'symptom',
+            'root_cause.reason' => 'dependency_error_surface',
       ], $extraAttributes, $errorContext), true, $message));
+        $emitter->exportTrace($emitter->finishSpan($appSpan, array_merge([
+            'component.name' => $name,
+            'component.ok' => false,
+            'duration_ms' => elapsedMs($start),
+            'error' => true,
+        ], $classification, $errorContext), true, (string) ($classification['root_cause.summary'] ?? $message)));
 
         $emitter->exportMetrics([
             $emitter->counter('php_component_errors_total', 1, ['component' => $name]),
@@ -498,6 +540,8 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
           'error_function' => (string) ($errorContext['error.function'] ?? ''),
           'error_file' => (string) ($errorContext['error.file'] ?? ''),
           'error_line' => (int) ($errorContext['error.line'] ?? 0),
+          'root_cause_layer' => (string) ($classification['root_cause.layer'] ?? 'unknown'),
+          'root_cause_reason' => (string) ($classification['root_cause.reason'] ?? 'unknown'),
         ]);
 
         return [
@@ -508,6 +552,64 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
             ],
         ];
     }
+}
+
+function classifyProbeFailure(string $name, array $extraAttributes, array $errorContext): array
+{
+  $message = strtolower((string) ($errorContext['error.message'] ?? ''));
+  $function = strtolower((string) ($errorContext['error.function'] ?? ''));
+  $dbSystem = strtolower((string) ($extraAttributes['db.system'] ?? ''));
+  $componentLayer = strtolower((string) ($extraAttributes['component.layer'] ?? ''));
+
+  $rootCauseLayer = 'unknown';
+  $rootCauseReason = 'unclassified_failure';
+  $rootCauseSummary = 'Probe failed without a root-cause classification';
+  $confidence = 'medium';
+
+  if ($dbSystem !== '' && str_contains($message, 'lock wait timeout')) {
+    $rootCauseLayer = 'application';
+    $rootCauseReason = 'transaction_held_open';
+    $rootCauseSummary = 'Application transaction likely held a MySQL lock too long before the dependency timed out';
+    $confidence = 'high';
+  } elseif ($dbSystem !== '' && str_contains($message, 'deadlock')) {
+    $rootCauseLayer = 'application';
+    $rootCauseReason = 'conflicting_transaction_order';
+    $rootCauseSummary = 'Application queries likely created a conflicting transaction order that resulted in a deadlock';
+    $confidence = 'high';
+  } elseif ($dbSystem === 'redis' && str_contains($message, 'transaction conflicts exceeded threshold')) {
+    $rootCauseLayer = 'application';
+    $rootCauseReason = 'high_contention_retry_pattern';
+    $rootCauseSummary = 'Application retry pattern likely created hot-key contention in Redis';
+    $confidence = 'high';
+  } elseif ($dbSystem !== '' && (
+      str_contains($message, 'connection refused') ||
+      str_contains($message, 'server has gone away') ||
+      str_contains($message, 'could not connect') ||
+      str_contains($message, 'name or service not known')
+    )) {
+    $rootCauseLayer = 'infrastructure';
+    $rootCauseReason = 'dependency_connectivity';
+    $rootCauseSummary = 'Dependency was unreachable or unavailable from the application';
+    $confidence = 'high';
+  } elseif ($componentLayer === 'application') {
+    $rootCauseLayer = 'application';
+    $rootCauseReason = 'downstream_application_failure';
+    $rootCauseSummary = 'Downstream application returned an error to the storefront';
+  } elseif ($dbSystem !== '' || $componentLayer === 'infrastructure') {
+    $rootCauseLayer = 'infrastructure';
+    $rootCauseReason = 'dependency_runtime_failure';
+    $rootCauseSummary = 'Dependency failed while serving the application request';
+  }
+
+  return [
+    'root_cause.layer' => $rootCauseLayer,
+    'root_cause.reason' => $rootCauseReason,
+    'root_cause.summary' => $rootCauseSummary,
+    'root_cause.confidence' => $confidence,
+    'root_cause.component' => $name,
+    'root_cause.detected_by' => 'php-storefront-heuristics',
+    'app.code.function' => $function,
+  ];
 }
 
 function queryMysql(): array
@@ -2145,5 +2247,11 @@ function describeThrowable(Throwable $error): array
     'error.function' => $function,
     'error.file' => $error->getFile(),
     'error.line' => $error->getLine(),
+    'exception.type' => get_class($error),
+    'exception.message' => $error->getMessage(),
+    'exception.stacktrace' => $error->getTraceAsString(),
+    'code.function.name' => $function,
+    'code.file.path' => $error->getFile(),
+    'code.line.number' => $error->getLine(),
   ];
 }
