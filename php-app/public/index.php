@@ -516,6 +516,9 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
             'component.ok' => false,
             'duration_ms' => elapsedMs($start),
             'error' => true,
+            'symptom.component' => $name,
+            'symptom.layer' => (string) ($extraAttributes['component.layer'] ?? 'unknown'),
+            'symptom.kind' => (string) ($extraAttributes['infra.kind'] ?? $extraAttributes['component.type'] ?? 'dependency'),
             'root_cause.layer' => 'symptom',
             'root_cause.reason' => 'dependency_error_surface',
       ], $extraAttributes, $errorContext), true, $message));
@@ -560,6 +563,8 @@ function classifyProbeFailure(string $name, array $extraAttributes, array $error
   $function = strtolower((string) ($errorContext['error.function'] ?? ''));
   $dbSystem = strtolower((string) ($extraAttributes['db.system'] ?? ''));
   $componentLayer = strtolower((string) ($extraAttributes['component.layer'] ?? ''));
+  $symptomLayer = (string) ($extraAttributes['component.layer'] ?? 'unknown');
+  $symptomKind = (string) ($extraAttributes['infra.kind'] ?? $extraAttributes['component.type'] ?? 'dependency');
 
   $rootCauseLayer = 'unknown';
   $rootCauseReason = 'unclassified_failure';
@@ -602,11 +607,14 @@ function classifyProbeFailure(string $name, array $extraAttributes, array $error
   }
 
   return [
+    'symptom.component' => $name,
+    'symptom.layer' => $symptomLayer,
+    'symptom.kind' => $symptomKind,
     'root_cause.layer' => $rootCauseLayer,
+    'root_cause.component' => $rootCauseLayer === 'application' ? 'php-storefront' : $name,
     'root_cause.reason' => $rootCauseReason,
     'root_cause.summary' => $rootCauseSummary,
     'root_cause.confidence' => $confidence,
-    'root_cause.component' => $name,
     'root_cause.detected_by' => 'php-storefront-heuristics',
     'app.code.function' => $function,
   ];
@@ -627,20 +635,29 @@ function queryMysql(): array
     );
 
     $wasteQueries = 0;
+    $transactionId = 'mysql-tx-' . bin2hex(random_bytes(4));
+    $lockTarget = 'products.id=1';
+    $operationSequence = [];
+    $lastQueryType = 'read';
 
     if (isDbBottleneckModeEnabled()) {
         try {
             $pdo->beginTransaction();
+            $operationSequence[] = 'begin_transaction';
 
             $stmt = $pdo->query('SELECT id FROM products WHERE id = 1 FOR UPDATE');
             $stmt->fetchAll(PDO::FETCH_ASSOC);
             $stmt->closeCursor();
             $wasteQueries++;
+            $lastQueryType = 'select_for_update';
+            $operationSequence[] = 'lock_product_row';
 
             $stmt = $pdo->query('SELECT SLEEP(0.12) AS waited');
             $stmt->fetchColumn();
             $stmt->closeCursor();
             $wasteQueries++;
+            $lastQueryType = 'sleep';
+            $operationSequence[] = 'hold_lock';
 
             $categories = ['apparel', 'accessories', 'stationery'];
             for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
@@ -650,22 +667,44 @@ function queryMysql(): array
                 $stmt->fetchColumn();
                 $stmt->closeCursor();
                 $wasteQueries++;
+                $lastQueryType = 'select_count';
+                $operationSequence[] = 'count_by_category:' . $category;
             }
 
             if (random_int(1, 100) <= 14) {
-                throw new RuntimeException('synthetic mysql lock wait timeout');
+                throw buildSyntheticDatabaseException(
+                    'synthetic mysql lock wait timeout',
+                    [
+                        'db.system' => 'mysql',
+                        'db.query_type' => 'select_for_update',
+                        'db.transaction_id' => $transactionId,
+                        'db.lock_target' => $lockTarget,
+                        'db.operation_sequence' => implode(' > ', $operationSequence),
+                        'db.transaction.stage' => 'lock_contention',
+                    ]
+                );
             }
 
             $stmt = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products');
             $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
             $stmt->closeCursor();
+            $lastQueryType = 'select_aggregate';
+            $operationSequence[] = 'aggregate_inventory';
 
             $pdo->commit();
+            $operationSequence[] = 'commit';
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
+                $operationSequence[] = 'rollback';
             }
-            throw $e;
+            throw enrichThrowable($e, [
+                'db.system' => 'mysql',
+                'db.query_type' => $lastQueryType,
+                'db.transaction_id' => $transactionId,
+                'db.lock_target' => $lockTarget,
+                'db.operation_sequence' => implode(' > ', $operationSequence),
+            ]);
         }
     } else {
         $stmt = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products');
@@ -690,20 +729,29 @@ function queryPostgres(): array
     );
 
     $wasteQueries = 0;
+    $transactionId = 'postgres-tx-' . bin2hex(random_bytes(4));
+    $lockTarget = 'users.id=1';
+    $operationSequence = [];
+    $lastQueryType = 'read';
 
     if (isDbBottleneckModeEnabled()) {
         try {
             $pdo->beginTransaction();
+            $operationSequence[] = 'begin_transaction';
 
             $stmt = $pdo->query('SELECT id FROM users WHERE id = 1 FOR UPDATE');
             $stmt->fetchAll(PDO::FETCH_ASSOC);
             $stmt->closeCursor();
             $wasteQueries++;
+            $lastQueryType = 'select_for_update';
+            $operationSequence[] = 'lock_user_row';
 
             $stmt = $pdo->query('SELECT pg_sleep(0.15)');
             $stmt->fetchAll(PDO::FETCH_ASSOC);
             $stmt->closeCursor();
             $wasteQueries++;
+            $lastQueryType = 'sleep';
+            $operationSequence[] = 'hold_lock';
 
             for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
                 $userId = ($i % 3) + 1;
@@ -712,22 +760,44 @@ function queryPostgres(): array
                 $stmt->fetchColumn();
                 $stmt->closeCursor();
                 $wasteQueries++;
+                $lastQueryType = 'select_count';
+                $operationSequence[] = 'count_recommendations:' . $userId;
             }
 
             if (random_int(1, 100) <= 14) {
-                throw new RuntimeException('synthetic postgres deadlock detected');
+                throw buildSyntheticDatabaseException(
+                    'synthetic postgres deadlock detected',
+                    [
+                        'db.system' => 'postgresql',
+                        'db.query_type' => 'select_for_update',
+                        'db.transaction_id' => $transactionId,
+                        'db.lock_target' => $lockTarget,
+                        'db.operation_sequence' => implode(' > ', $operationSequence),
+                        'db.transaction.stage' => 'deadlock',
+                    ]
+                );
             }
 
             $stmt = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations');
             $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
             $stmt->closeCursor();
+            $lastQueryType = 'select_aggregate';
+            $operationSequence[] = 'aggregate_recommendations';
 
             $pdo->commit();
+            $operationSequence[] = 'commit';
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
+                $operationSequence[] = 'rollback';
             }
-            throw $e;
+            throw enrichThrowable($e, [
+                'db.system' => 'postgresql',
+                'db.query_type' => $lastQueryType,
+                'db.transaction_id' => $transactionId,
+                'db.lock_target' => $lockTarget,
+                'db.operation_sequence' => implode(' > ', $operationSequence),
+            ]);
         }
     } else {
         $stmt = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations');
@@ -2224,6 +2294,38 @@ function triggerIntentionalErrorPath(): void
   throw new RuntimeException('Intentional PHP error path triggered');
 }
 
+function buildSyntheticDatabaseException(string $message, array $context = []): RuntimeException
+{
+  return enrichThrowable(new RuntimeException($message), $context);
+}
+
+function enrichThrowable(Throwable $error, array $context = []): RuntimeException
+{
+  if ($context === []) {
+    if ($error instanceof RuntimeException) {
+      return $error;
+    }
+    return new RuntimeException($error->getMessage(), 0, $error);
+  }
+
+  return new RuntimeException($error->getMessage(), 0, new ErrorContextException($context, $error));
+}
+
+final class ErrorContextException extends RuntimeException
+{
+  public function __construct(
+    private readonly array $context,
+    ?Throwable $previous = null,
+  ) {
+    parent::__construct('error_context', 0, $previous);
+  }
+
+  public function context(): array
+  {
+    return $this->context;
+  }
+}
+
 function describeThrowable(Throwable $error): array
 {
   $function = '';
@@ -2241,6 +2343,8 @@ function describeThrowable(Throwable $error): array
     $function = '{unknown}';
   }
 
+  $context = extractThrowableContext($error);
+
   return [
     'error.type' => get_class($error),
     'error.message' => $error->getMessage(),
@@ -2253,5 +2357,19 @@ function describeThrowable(Throwable $error): array
     'code.function.name' => $function,
     'code.file.path' => $error->getFile(),
     'code.line.number' => $error->getLine(),
+    ...$context,
   ];
+}
+
+function extractThrowableContext(Throwable $error): array
+{
+  $current = $error;
+  while ($current !== null) {
+    if ($current instanceof ErrorContextException) {
+      return $current->context();
+    }
+    $current = $current->getPrevious();
+  }
+
+  return [];
 }
