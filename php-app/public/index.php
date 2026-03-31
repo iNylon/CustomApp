@@ -502,21 +502,22 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
 
     try {
     $data = $operation($span, $appSpan);
+      $telemetry = extractProbeTelemetry($data);
 
         $emitter->exportTrace($emitter->finishSpan($span, array_merge([
             'component.name' => $name,
             'component.ok' => true,
             'duration_ms' => elapsedMs($start),
-        ], $extraAttributes)));
-        $emitter->exportTrace($emitter->finishSpan($appSpan, [
+        ], $extraAttributes, $telemetry)));
+        $emitter->exportTrace($emitter->finishSpan($appSpan, array_merge([
             'component.name' => $name,
             'component.ok' => true,
             'root_cause.layer' => 'none',
             'root_cause.reason' => 'no_error',
             'duration_ms' => elapsedMs($start),
-        ]));
+        ], $telemetry)));
 
-        return ['ok' => true, 'data' => $data];
+        return ['ok' => true, 'data' => stripProbeTelemetry($data)];
     } catch (Throwable $error) {
         $message = $error->getMessage();
       $errorContext = describeThrowable($error);
@@ -566,6 +567,18 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
             ],
         ];
     }
+}
+
+function extractProbeTelemetry(array $data): array
+{
+  $telemetry = $data['_telemetry'] ?? [];
+  return is_array($telemetry) ? $telemetry : [];
+}
+
+function stripProbeTelemetry(array $data): array
+{
+  unset($data['_telemetry']);
+  return $data;
 }
 
 function classifyProbeFailure(string $name, array $extraAttributes, array $errorContext): array
@@ -633,6 +646,7 @@ function classifyProbeFailure(string $name, array $extraAttributes, array $error
 
 function queryMysql(bool $forceFailure = false): array
 {
+    $queryStart = microtime(true);
     $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
     if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
         $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = true;
@@ -650,6 +664,13 @@ function queryMysql(bool $forceFailure = false): array
     $lockTarget = 'products.id=1';
     $operationSequence = [];
     $lastQueryType = 'read';
+    $queryShape = 'point_lookup_with_lock';
+    $queryRisk = 'normal';
+    $baselineMs = 24.0;
+    $p95Ms = 80.0;
+    $p99Ms = 120.0;
+    $fullTableScan = false;
+    $poorlyOptimized = false;
 
     if (isDbBottleneckModeEnabled()) {
         try {
@@ -680,19 +701,33 @@ function queryMysql(bool $forceFailure = false): array
                 $wasteQueries++;
                 $lastQueryType = 'select_count';
                 $operationSequence[] = 'count_by_category:' . $category;
+                $queryShape = 'repeated_count_by_category';
+                $queryRisk = 'aggregation_repeated_under_lock';
+                $fullTableScan = true;
+                $poorlyOptimized = true;
             }
 
             if ($forceFailure || random_int(1, 100) <= 14) {
+                $durationMs = round((microtime(true) - $queryStart) * 1000, 2);
                 throw buildDatabaseException(
                     'mysql lock wait timeout while loading catalog inventory',
-                    [
+                    array_merge([
                         'db.system' => 'mysql',
                         'db.query_type' => 'select_for_update',
                         'db.transaction_id' => $transactionId,
                         'db.lock_target' => $lockTarget,
                         'db.operation_sequence' => implode(' > ', $operationSequence),
                         'db.transaction.stage' => 'lock_contention',
-                    ]
+                    ], databasePerformanceAttributes(
+                        $durationMs,
+                        $baselineMs,
+                        $p95Ms,
+                        $p99Ms,
+                        $fullTableScan,
+                        $poorlyOptimized,
+                        $queryShape,
+                        $queryRisk
+                    ))
                 );
             }
 
@@ -715,6 +750,16 @@ function queryMysql(bool $forceFailure = false): array
                 'db.transaction_id' => $transactionId,
                 'db.lock_target' => $lockTarget,
                 'db.operation_sequence' => implode(' > ', $operationSequence),
+                ...databasePerformanceAttributes(
+                    round((microtime(true) - $queryStart) * 1000, 2),
+                    $baselineMs,
+                    $p95Ms,
+                    $p99Ms,
+                    $fullTableScan,
+                    $poorlyOptimized,
+                    $queryShape,
+                    $queryRisk
+                ),
             ]);
         }
     } else {
@@ -723,15 +768,27 @@ function queryMysql(bool $forceFailure = false): array
         $stmt->closeCursor();
     }
 
+    $durationMs = round((microtime(true) - $queryStart) * 1000, 2);
     return [
         'product_count' => (int) ($row['product_count'] ?? 0),
         'inventory_total' => (int) ($row['inventory_total'] ?? 0),
         'waste_queries' => $wasteQueries,
+        '_telemetry' => databasePerformanceAttributes(
+            $durationMs,
+            $baselineMs,
+            $p95Ms,
+            $p99Ms,
+            $fullTableScan,
+            $poorlyOptimized,
+            $queryShape,
+            $queryRisk
+        ),
     ];
 }
 
 function queryPostgres(bool $forceFailure = false): array
 {
+    $queryStart = microtime(true);
     $pdo = new PDO(
         getenv('POSTGRES_DSN') ?: 'pgsql:host=postgres;port=5432;dbname=recommendations',
         getenv('POSTGRES_USER') ?: 'app',
@@ -744,6 +801,13 @@ function queryPostgres(bool $forceFailure = false): array
     $lockTarget = 'users.id=1';
     $operationSequence = [];
     $lastQueryType = 'read';
+    $queryShape = 'user_recommendation_lookup';
+    $queryRisk = 'normal';
+    $baselineMs = 28.0;
+    $p95Ms = 90.0;
+    $p99Ms = 130.0;
+    $fullTableScan = false;
+    $poorlyOptimized = false;
 
     if (isDbBottleneckModeEnabled()) {
         try {
@@ -773,19 +837,33 @@ function queryPostgres(bool $forceFailure = false): array
                 $wasteQueries++;
                 $lastQueryType = 'select_count';
                 $operationSequence[] = 'count_recommendations:' . $userId;
+                $queryShape = 'repeated_recommendation_count';
+                $queryRisk = 'repeated_count_under_lock';
+                $fullTableScan = true;
+                $poorlyOptimized = true;
             }
 
             if ($forceFailure || random_int(1, 100) <= 14) {
+                $durationMs = round((microtime(true) - $queryStart) * 1000, 2);
                 throw buildDatabaseException(
                     'postgres transaction deadlock while loading recommendations',
-                    [
+                    array_merge([
                         'db.system' => 'postgresql',
                         'db.query_type' => 'select_for_update',
                         'db.transaction_id' => $transactionId,
                         'db.lock_target' => $lockTarget,
                         'db.operation_sequence' => implode(' > ', $operationSequence),
                         'db.transaction.stage' => 'deadlock',
-                    ]
+                    ], databasePerformanceAttributes(
+                        $durationMs,
+                        $baselineMs,
+                        $p95Ms,
+                        $p99Ms,
+                        $fullTableScan,
+                        $poorlyOptimized,
+                        $queryShape,
+                        $queryRisk
+                    ))
                 );
             }
 
@@ -808,6 +886,16 @@ function queryPostgres(bool $forceFailure = false): array
                 'db.transaction_id' => $transactionId,
                 'db.lock_target' => $lockTarget,
                 'db.operation_sequence' => implode(' > ', $operationSequence),
+                ...databasePerformanceAttributes(
+                    round((microtime(true) - $queryStart) * 1000, 2),
+                    $baselineMs,
+                    $p95Ms,
+                    $p99Ms,
+                    $fullTableScan,
+                    $poorlyOptimized,
+                    $queryShape,
+                    $queryRisk
+                ),
             ]);
         }
     } else {
@@ -816,20 +904,35 @@ function queryPostgres(bool $forceFailure = false): array
         $stmt->closeCursor();
     }
 
+    $durationMs = round((microtime(true) - $queryStart) * 1000, 2);
     return [
         'recommendation_count' => (int) ($row['recommendation_count'] ?? 0),
         'waste_queries' => $wasteQueries,
+        '_telemetry' => databasePerformanceAttributes(
+            $durationMs,
+            $baselineMs,
+            $p95Ms,
+            $p99Ms,
+            $fullTableScan,
+            $poorlyOptimized,
+            $queryShape,
+            $queryRisk
+        ),
     ];
 }
 
 function queryRedis(bool $forceFailure = false): array
 {
+    $queryStart = microtime(true);
     $redis = new Redis();
     $redis->connect(getenv('REDIS_HOST') ?: 'redis', (int) (getenv('REDIS_PORT') ?: 6379), 1.5);
 
     $loops = max(1, min((int) (getenv('APP_REDIS_BOTTLENECK_LOOPS') ?: 20), 200));
     $wasteOps = 0;
     $retryConflicts = 0;
+    $baselineMs = 8.0;
+    $p95Ms = 30.0;
+    $p99Ms = 55.0;
 
     $redis->set('php:last_seen', gmdate('c'));
     $hotKey = 'redis:hotspot:counter';
@@ -863,14 +966,61 @@ function queryRedis(bool $forceFailure = false): array
             'db.transaction_id' => 'redis-tx-' . bin2hex(random_bytes(4)),
             'db.lock_target' => $hotKey,
             'db.operation_sequence' => 'watch > multi > set > expire > exec',
+            ...databasePerformanceAttributes(
+                round((microtime(true) - $queryStart) * 1000, 2),
+                $baselineMs,
+                $p95Ms,
+                $p99Ms,
+                false,
+                $retryConflicts > 0,
+                'hot_key_counter_update',
+                'cache_contention'
+            ),
         ]);
     }
 
+    $durationMs = round((microtime(true) - $queryStart) * 1000, 2);
     return [
         'redis_ping' => $redis->ping(),
         'php_last_seen' => (string) $redis->get('php:last_seen'),
         'redis_waste_ops' => $wasteOps,
         'redis_tx_conflicts' => $retryConflicts,
+        '_telemetry' => databasePerformanceAttributes(
+            $durationMs,
+            $baselineMs,
+            $p95Ms,
+            $p99Ms,
+            false,
+            $retryConflicts > 0,
+            'hot_key_counter_update',
+            'cache_contention'
+        ),
+    ];
+}
+
+function databasePerformanceAttributes(
+    float $durationMs,
+    float $baselineMs,
+    float $p95Ms,
+    float $p99Ms,
+    bool $fullTableScan,
+    bool $poorlyOptimized,
+    string $queryShape,
+    string $queryRisk
+): array {
+    return [
+        'db.query.duration' => $durationMs,
+        'db.response_time_ms' => $durationMs,
+        'db.response_time.baseline_ms' => $baselineMs,
+        'db.response_time.delta_ms' => round($durationMs - $baselineMs, 2),
+        'db.response_time.p95_ms' => $p95Ms,
+        'db.response_time.p99_ms' => $p99Ms,
+        'db.slow_query' => $durationMs >= $p95Ms,
+        'db.response_time.elevated' => $durationMs > $baselineMs,
+        'db.full_table_scan' => $fullTableScan,
+        'db.poorly_optimized_query' => $poorlyOptimized,
+        'db.query.shape' => $queryShape,
+        'db.query.risk' => $queryRisk,
     ];
 }
 
