@@ -60,6 +60,71 @@ redis.connect().catch((error) => {
 
 const app = express();
 
+function errorLocation(error) {
+  const stack = typeof error?.stack === 'string' ? error.stack.split('\n') : [];
+  for (const line of stack) {
+    const match = line.match(/\s*at\s+(.*?)\s+\((.*):(\d+):(\d+)\)/) || line.match(/\s*at\s+(.*):(\d+):(\d+)/);
+    if (!match) {
+      continue;
+    }
+    if (match.length === 5) {
+      return { functionName: match[1], filePath: match[2], lineNumber: Number(match[3]) };
+    }
+    return { functionName: '{anonymous}', filePath: match[1], lineNumber: Number(match[2]) };
+  }
+  return { functionName: '{unknown}', filePath: __filename, lineNumber: 0 };
+}
+
+function attachErrorContext(error, context = {}) {
+  error.observabilityContext = { ...(error.observabilityContext || {}), ...context };
+  return error;
+}
+
+function classifyError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('lock wait timeout')) {
+    return {
+      'root_cause.layer': 'application',
+      'root_cause.component': serviceName,
+      'root_cause.reason': 'transaction_held_open',
+      'root_cause.summary': 'Node inventory logic likely held a database lock too long',
+      'root_cause.confidence': 'high',
+    };
+  }
+  if (message.includes('deadlock')) {
+    return {
+      'root_cause.layer': 'application',
+      'root_cause.component': serviceName,
+      'root_cause.reason': 'conflicting_transaction_order',
+      'root_cause.summary': 'Node inventory queries likely created conflicting transaction order',
+      'root_cause.confidence': 'high',
+    };
+  }
+  return {
+    'root_cause.layer': 'application',
+    'root_cause.component': serviceName,
+    'root_cause.reason': 'application_runtime_failure',
+    'root_cause.summary': 'Node service raised an application error while processing inventory',
+    'root_cause.confidence': 'medium',
+  };
+}
+
+function applyErrorAttributes(span, error, symptomComponent, symptomLayer) {
+  const location = errorLocation(error);
+  const context = error?.observabilityContext || {};
+  const classification = classifyError(error);
+  span.setAttribute('symptom.component', symptomComponent);
+  span.setAttribute('symptom.layer', symptomLayer);
+  Object.entries(classification).forEach(([key, value]) => span.setAttribute(key, value));
+  span.setAttribute('exception.type', error?.name || 'Error');
+  span.setAttribute('exception.message', error?.message || 'Unknown error');
+  span.setAttribute('exception.stacktrace', String(error?.stack || ''));
+  span.setAttribute('code.file.path', location.filePath);
+  span.setAttribute('code.function.name', location.functionName);
+  span.setAttribute('code.line.number', location.lineNumber);
+  Object.entries(context).forEach(([key, value]) => span.setAttribute(key, value));
+}
+
 function generateRequestId() {
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -125,8 +190,18 @@ app.get('/inventory', async (req, res) => {
     } catch (error) {
       errorCounter.add(1, { route: '/inventory' });
       span.recordException(error);
+      const location = errorLocation(error);
+      applyErrorAttributes(span, error, 'mysql', 'infrastructure');
       span.setStatus({ code: 2, message: error.message });
-      log('ERROR', 'node inventory failed', { error: error.message, request_id: req.requestId });
+      log('ERROR', 'node inventory failed', {
+        error: error.message,
+        request_id: req.requestId,
+        error_type: error.name || 'Error',
+        error_file: location.filePath,
+        error_function: location.functionName,
+        error_line: location.lineNumber,
+        ...(error.observabilityContext || {}),
+      });
       res.status(503).json({ error: error.message, service: serviceName, request_id: req.requestId });
       span.end();
     }
@@ -137,17 +212,27 @@ async function induceMysqlBottleneck(rows) {
   const connection = await mysqlPool.getConnection();
   const products = rows.length > 0 ? rows : [{ sku: 'SKU-100' }];
   let totalQueries = 0;
+  const transactionId = `node-mysql-${Date.now().toString(36)}`;
+  const operationSequence = [];
+  let lastQueryType = 'read';
 
   try {
     await connection.beginTransaction();
+    operationSequence.push('begin_transaction');
     await connection.query('SELECT id FROM products WHERE id = 1 FOR UPDATE');
+    lastQueryType = 'select_for_update';
+    operationSequence.push('lock_product_row');
     await connection.query('SELECT SLEEP(0.12)');
+    lastQueryType = 'sleep';
+    operationSequence.push('hold_lock');
     totalQueries += 2;
 
     const loopCount = Math.max(dbBottleneckLoops, products.length);
     for (let i = 0; i < loopCount; i += 1) {
       const sku = products[i % products.length].sku;
       await connection.query('SELECT inventory, price FROM products WHERE sku = ?', [sku]);
+      lastQueryType = 'select_inventory';
+      operationSequence.push(`read_product:${sku}`);
       totalQueries += 1;
     }
 
@@ -155,7 +240,14 @@ async function induceMysqlBottleneck(rows) {
     return totalQueries;
   } catch (error) {
     await connection.rollback();
-    throw error;
+    operationSequence.push('rollback');
+    throw attachErrorContext(error, {
+      'db.system': 'mysql',
+      'db.query_type': lastQueryType,
+      'db.transaction_id': transactionId,
+      'db.lock_target': 'products.id=1',
+      'db.operation_sequence': operationSequence.join(' > '),
+    });
   } finally {
     connection.release();
   }

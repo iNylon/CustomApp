@@ -2,6 +2,7 @@ import json
 import os
 import random
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 
@@ -10,7 +11,7 @@ import redis
 from flask import Flask, jsonify, request
 from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.metrics import MeterProvider
@@ -90,6 +91,83 @@ def get_redis():
     )
 
 
+def attach_error_context(error: Exception, **context):
+    existing = getattr(error, "observability_context", {})
+    setattr(error, "observability_context", {**existing, **context})
+    return error
+
+
+def extract_error_context(error: Exception):
+    return getattr(error, "observability_context", {})
+
+
+def error_location(error: Exception):
+    frames = traceback.extract_tb(error.__traceback__)
+    for frame in reversed(frames):
+        if frame.filename.endswith("app.py"):
+            return {
+                "code.file.path": frame.filename,
+                "code.function.name": frame.name,
+                "code.line.number": frame.lineno,
+            }
+    if frames:
+        frame = frames[-1]
+        return {
+            "code.file.path": frame.filename,
+            "code.function.name": frame.name,
+            "code.line.number": frame.lineno,
+        }
+    return {
+        "code.file.path": __file__,
+        "code.function.name": "{unknown}",
+        "code.line.number": 0,
+    }
+
+
+def classify_error(error: Exception):
+    message = str(error).lower()
+    if "deadlock" in message:
+        return {
+            "root_cause.layer": "application",
+            "root_cause.component": SERVICE_NAME,
+            "root_cause.reason": "conflicting_transaction_order",
+            "root_cause.summary": "Python recommendation queries likely created conflicting transaction order",
+            "root_cause.confidence": "high",
+        }
+    if "lock" in message:
+        return {
+            "root_cause.layer": "application",
+            "root_cause.component": SERVICE_NAME,
+            "root_cause.reason": "transaction_held_open",
+            "root_cause.summary": "Python recommendation flow likely held a lock too long",
+            "root_cause.confidence": "high",
+        }
+    return {
+        "root_cause.layer": "application",
+        "root_cause.component": SERVICE_NAME,
+        "root_cause.reason": "application_runtime_failure",
+        "root_cause.summary": "Python recommendation service raised an application error",
+        "root_cause.confidence": "medium",
+    }
+
+
+def apply_error_attributes(span, error: Exception, symptom_component: str, symptom_layer: str):
+    location = error_location(error)
+    context = extract_error_context(error)
+    classification = classify_error(error)
+    span.set_attribute("symptom.component", symptom_component)
+    span.set_attribute("symptom.layer", symptom_layer)
+    for key, value in classification.items():
+        span.set_attribute(key, value)
+    span.set_attribute("exception.type", error.__class__.__name__)
+    span.set_attribute("exception.message", str(error))
+    span.set_attribute("exception.stacktrace", "".join(traceback.format_exception(type(error), error, error.__traceback__)))
+    for key, value in location.items():
+        span.set_attribute(key, value)
+    for key, value in context.items():
+        span.set_attribute(key, value)
+
+
 @app.before_request
 def before_request():
     request._start_time = time.perf_counter()
@@ -123,69 +201,102 @@ def recommendations():
     with tracer.start_as_current_span("python.recommendations", kind=SpanKind.SERVER, attributes={"user.id": user_id, "http.route": "/recommendations", "http.method": "GET"}):
         span = trace.get_current_span()
         span.set_attribute("request.id", request._request_id)
-        cache = get_redis()
-        cache_key = f"recommendations:{user_id}"
-        cached = cache.get(cache_key)
-        if cached and not DB_BOTTLENECK_MODE:
-            payload = json.loads(cached)
-            payload["request_id"] = request._request_id
-            log("INFO", "served recommendations from cache", user_id=user_id, request_id=request._request_id)
-            return jsonify(payload)
+        try:
+            cache = get_redis()
+            cache_key = f"recommendations:{user_id}"
+            cached = cache.get(cache_key)
+            if cached and not DB_BOTTLENECK_MODE:
+                payload = json.loads(cached)
+                payload["request_id"] = request._request_id
+                log("INFO", "served recommendations from cache", user_id=user_id, request_id=request._request_id)
+                return jsonify(payload)
 
-        with get_pg_connection() as conn, conn.cursor() as cur:
-            waste_queries = 0
+            with get_pg_connection() as conn, conn.cursor() as cur:
+                waste_queries = 0
+                transaction_id = f"python-pg-{uuid.uuid4().hex[:10]}"
+                operation_sequence = []
+                last_query_type = "read"
 
-            if DB_BOTTLENECK_MODE:
-                cur.execute("SELECT id FROM users WHERE id = 1 FOR UPDATE")
-                cur.execute("SELECT pg_sleep(0.15)")
-                waste_queries += 2
-
-                for _ in range(DB_BOTTLENECK_LOOPS):
-                    cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,))
-                    cur.fetchone()
-                    waste_queries += 1
-
-            cur.execute(
-                """
-                SELECT u.email, u.tier, r.sku, r.score
-                FROM users u
-                JOIN recommendations r ON r.user_id = u.id
-                WHERE u.id = %s
-                ORDER BY r.score DESC
-                """,
-                (user_id,),
-            )
-            rows = cur.fetchall()
-
-            items = []
-            for row in rows:
                 if DB_BOTTLENECK_MODE:
-                    cur.execute("SELECT tier FROM users WHERE id = %s", (user_id,))
-                    tier_row = cur.fetchone()
-                    waste_queries += 1
-                    tier = tier_row[0] if tier_row else row[1]
-                else:
-                    tier = row[1]
+                    cur.execute("SELECT id FROM users WHERE id = 1 FOR UPDATE")
+                    operation_sequence.append("lock_user_row")
+                    last_query_type = "select_for_update"
+                    cur.execute("SELECT pg_sleep(0.15)")
+                    operation_sequence.append("hold_lock")
+                    last_query_type = "sleep"
+                    waste_queries += 2
 
-                items.append({"email": row[0], "tier": tier, "sku": row[2], "score": float(row[3])})
+                    for _ in range(DB_BOTTLENECK_LOOPS):
+                        cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,))
+                        cur.fetchone()
+                        operation_sequence.append("count_recommendations")
+                        last_query_type = "select_count"
+                        waste_queries += 1
 
-        payload = {
-            "service": SERVICE_NAME,
-            "request_id": request._request_id,
-            "user_id": user_id,
-            "items": items,
-            "cache": False,
-            "waste_queries": waste_queries,
-        }
-        cache.setex(cache_key, 5 if DB_BOTTLENECK_MODE else 20, json.dumps(payload))
+                cur.execute(
+                    """
+                    SELECT u.email, u.tier, r.sku, r.score
+                    FROM users u
+                    JOIN recommendations r ON r.user_id = u.id
+                    WHERE u.id = %s
+                    ORDER BY r.score DESC
+                    """,
+                    (user_id,),
+                )
+                rows = cur.fetchall()
 
-        if random.randint(1, 100) <= 12:
+                items = []
+                for row in rows:
+                    if DB_BOTTLENECK_MODE:
+                        cur.execute("SELECT tier FROM users WHERE id = %s", (user_id,))
+                        tier_row = cur.fetchone()
+                        operation_sequence.append("fetch_user_tier")
+                        last_query_type = "select_tier"
+                        waste_queries += 1
+                        tier = tier_row[0] if tier_row else row[1]
+                    else:
+                        tier = row[1]
+
+                    items.append({"email": row[0], "tier": tier, "sku": row[2], "score": float(row[3])})
+
+            payload = {
+                "service": SERVICE_NAME,
+                "request_id": request._request_id,
+                "user_id": user_id,
+                "items": items,
+                "cache": False,
+                "waste_queries": waste_queries,
+            }
+            cache.setex(cache_key, 5 if DB_BOTTLENECK_MODE else 20, json.dumps(payload))
+
+            if random.randint(1, 100) <= 12:
+                raise attach_error_context(
+                    RuntimeError("synthetic python recommendation failure"),
+                    **{
+                        "db.system": "postgresql",
+                        "db.query_type": last_query_type,
+                        "db.transaction_id": transaction_id,
+                        "db.lock_target": "users.id=1",
+                        "db.operation_sequence": " > ".join(operation_sequence),
+                    },
+                )
+
+            log("INFO", "served recommendations from postgres", user_id=user_id, count=len(payload["items"]), request_id=request._request_id)
+            return jsonify(payload)
+        except Exception as error:
             error_counter.add(1, {"route": request.path})
-            log("ERROR", "synthetic python recommendation error", user_id=user_id, request_id=request._request_id)
-            return jsonify({"error": "synthetic recommendation failure", "service": SERVICE_NAME, "request_id": request._request_id}), 503
-
-        log("INFO", "served recommendations from postgres", user_id=user_id, count=len(payload["items"]), request_id=request._request_id)
-        return jsonify(payload)
+            span.record_exception(error)
+            apply_error_attributes(span, error, "postgres", "infrastructure")
+            span.set_status(Status(StatusCode.ERROR, str(error)))
+            log(
+                "ERROR",
+                "python recommendations failed",
+                error=str(error),
+                request_id=request._request_id,
+                error_type=error.__class__.__name__,
+                **extract_error_context(error),
+            )
+            return jsonify({"error": str(error), "service": SERVICE_NAME, "request_id": request._request_id}), 503
 
 
 if __name__ == "__main__":

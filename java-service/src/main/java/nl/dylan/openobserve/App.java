@@ -31,6 +31,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -133,9 +134,10 @@ public final class App {
         log("INFO", "java quote served", Map.of("quote", quote, "request_id", requestId));
       } catch (Exception error) {
         span.recordException(error);
+        applyErrorAttributes(span, error, "java-checkout", "application");
         span.setStatus(StatusCode.ERROR, error.getMessage());
         errorCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
-        log("ERROR", "java quote failed", Map.of("error", error.getMessage(), "request_id", requestId));
+        log("ERROR", "java quote failed", errorContextForLog(error, requestId));
         writeJson(exchange, 503, "{\"error\":\"" + error.getMessage() + "\",\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\"}");
       } finally {
         latencyHistogram.record((System.nanoTime() - start) / 1_000_000.0, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
@@ -202,6 +204,71 @@ public final class App {
       }
     }
     builder.append("}");
+    return builder.toString();
+  }
+
+  private static void applyErrorAttributes(Span span, Throwable error, String symptomComponent, String symptomLayer) {
+    StackTraceElement frame = firstApplicationFrame(error);
+    Map<String, String> classification = classifyError(error);
+
+    span.setAttribute("symptom.component", symptomComponent);
+    span.setAttribute("symptom.layer", symptomLayer);
+    for (Map.Entry<String, String> entry : classification.entrySet()) {
+      span.setAttribute(entry.getKey(), entry.getValue());
+    }
+    span.setAttribute("exception.type", error.getClass().getSimpleName());
+    span.setAttribute("exception.message", String.valueOf(error.getMessage()));
+    span.setAttribute("exception.stacktrace", stackTraceAsString(error));
+    span.setAttribute("code.file.path", frame.getFileName() == null ? "App.java" : frame.getFileName());
+    span.setAttribute("code.function.name", frame.getClassName() + "." + frame.getMethodName());
+    span.setAttribute("code.line.number", frame.getLineNumber());
+  }
+
+  private static Map<String, Object> errorContextForLog(Throwable error, String requestId) {
+    StackTraceElement frame = firstApplicationFrame(error);
+    Map<String, Object> context = new LinkedHashMap<>();
+    context.put("error", error.getMessage());
+    context.put("request_id", requestId);
+    context.put("error_type", error.getClass().getSimpleName());
+    context.put("code_file_path", frame.getFileName() == null ? "App.java" : frame.getFileName());
+    context.put("code_function_name", frame.getClassName() + "." + frame.getMethodName());
+    context.put("code_line_number", frame.getLineNumber());
+    return context;
+  }
+
+  private static Map<String, String> classifyError(Throwable error) {
+    String message = error.getMessage() == null ? "" : error.getMessage().toLowerCase();
+    if (message.contains("timeout")) {
+      return Map.of(
+          "root_cause.layer", "application",
+          "root_cause.component", SERVICE_NAME,
+          "root_cause.reason", "application_timeout",
+          "root_cause.summary", "Java checkout logic exceeded its expected execution window",
+          "root_cause.confidence", "medium");
+    }
+    return Map.of(
+        "root_cause.layer", "application",
+        "root_cause.component", SERVICE_NAME,
+        "root_cause.reason", "application_runtime_failure",
+        "root_cause.summary", "Java checkout service raised an application exception",
+        "root_cause.confidence", "medium");
+  }
+
+  private static StackTraceElement firstApplicationFrame(Throwable error) {
+    for (StackTraceElement frame : error.getStackTrace()) {
+      if (frame.getClassName().startsWith("nl.dylan.openobserve")) {
+        return frame;
+      }
+    }
+    return error.getStackTrace().length > 0 ? error.getStackTrace()[0] : new StackTraceElement("nl.dylan.openobserve.App", "{unknown}", "App.java", 0);
+  }
+
+  private static String stackTraceAsString(Throwable error) {
+    StringBuilder builder = new StringBuilder();
+    builder.append(error.toString()).append("\n");
+    for (StackTraceElement frame : error.getStackTrace()) {
+      builder.append("at ").append(frame).append("\n");
+    }
     return builder.toString();
   }
 }
