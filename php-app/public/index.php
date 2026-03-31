@@ -574,6 +574,7 @@ function stripProbeTelemetry(array $data): array
 function queryMysql(bool $forceFailure = false): array
 {
     $queryStart = microtime(true);
+    $connectStart = microtime(true);
     $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
     if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
         $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = true;
@@ -585,27 +586,41 @@ function queryMysql(bool $forceFailure = false): array
         getenv('MYSQL_PASSWORD') ?: 'app',
         $options
     );
+    $connectionWaitMs = round((microtime(true) - $connectStart) * 1000, 2);
 
     $wasteQueries = 0;
     $transactionId = 'mysql-tx-' . bin2hex(random_bytes(4));
     $lockTarget = 'products.id=1';
     $operationSequence = [];
     $lastQueryType = 'read';
+    $transactionStart = null;
+    $statement = 'SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products';
+    $table = 'products';
+    $operationName = 'SELECT';
+    $rowsReturned = 0;
+    $rowsAffected = 0;
 
     if (isDbBottleneckModeEnabled()) {
         try {
             $pdo->beginTransaction();
+            $transactionStart = microtime(true);
             $operationSequence[] = 'begin_transaction';
 
+            $statement = 'SELECT id FROM products WHERE id = 1 FOR UPDATE';
+            $operationName = 'SELECT';
             $stmt = $pdo->query('SELECT id FROM products WHERE id = 1 FOR UPDATE');
-            $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $lockedRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $rowsReturned = count($lockedRows);
             $stmt->closeCursor();
             $wasteQueries++;
             $lastQueryType = 'select_for_update';
             $operationSequence[] = 'lock_product_row';
 
+            $statement = 'SELECT SLEEP(0.12) AS waited';
+            $operationName = 'SELECT';
             $stmt = $pdo->query('SELECT SLEEP(0.12) AS waited');
             $stmt->fetchColumn();
+            $rowsReturned = 1;
             $stmt->closeCursor();
             $wasteQueries++;
             $lastQueryType = 'sleep';
@@ -614,9 +629,12 @@ function queryMysql(bool $forceFailure = false): array
             $categories = ['apparel', 'accessories', 'stationery'];
             for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
                 $category = $categories[$i % count($categories)];
+                $statement = 'SELECT COUNT(*) FROM products WHERE category = :category';
+                $operationName = 'SELECT';
                 $stmt = $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = :category');
                 $stmt->execute(['category' => $category]);
                 $stmt->fetchColumn();
+                $rowsReturned = 1;
                 $stmt->closeCursor();
                 $wasteQueries++;
                 $lastQueryType = 'select_count';
@@ -634,14 +652,29 @@ function queryMysql(bool $forceFailure = false): array
                         'db.lock_target' => $lockTarget,
                         'db.operation_sequence' => implode(' > ', $operationSequence),
                         'db.transaction.stage' => 'lock_contention',
+                        ...databaseObservedAttributes(
+                            $durationMs,
+                            $connectionWaitMs,
+                            $transactionStart,
+                            $statement,
+                            $table,
+                            $operationName,
+                            $rowsReturned,
+                            $rowsAffected,
+                            0,
+                            $wasteQueries
+                        ),
                     ], databasePerformanceAttributes(
                         $durationMs
                     ))
                 );
             }
 
+            $statement = 'SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products';
+            $operationName = 'SELECT';
             $stmt = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products');
             $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $rowsReturned = $row === [] ? 0 : 1;
             $stmt->closeCursor();
             $lastQueryType = 'select_aggregate';
             $operationSequence[] = 'aggregate_inventory';
@@ -659,14 +692,29 @@ function queryMysql(bool $forceFailure = false): array
                 'db.transaction_id' => $transactionId,
                 'db.lock_target' => $lockTarget,
                 'db.operation_sequence' => implode(' > ', $operationSequence),
+                ...databaseObservedAttributes(
+                    round((microtime(true) - $queryStart) * 1000, 2),
+                    $connectionWaitMs,
+                    $transactionStart,
+                    $statement,
+                    $table,
+                    $operationName,
+                    $rowsReturned,
+                    $rowsAffected,
+                    0,
+                    $wasteQueries
+                ),
                 ...databasePerformanceAttributes(
                     round((microtime(true) - $queryStart) * 1000, 2)
                 ),
             ]);
         }
     } else {
+        $statement = 'SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products';
+        $operationName = 'SELECT';
         $stmt = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products');
         $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $rowsReturned = $row === [] ? 0 : 1;
         $stmt->closeCursor();
     }
 
@@ -675,8 +723,20 @@ function queryMysql(bool $forceFailure = false): array
         'product_count' => (int) ($row['product_count'] ?? 0),
         'inventory_total' => (int) ($row['inventory_total'] ?? 0),
         'waste_queries' => $wasteQueries,
-        '_telemetry' => databasePerformanceAttributes(
-            $durationMs
+        '_telemetry' => array_merge(
+            databaseObservedAttributes(
+                $durationMs,
+                $connectionWaitMs,
+                $transactionStart,
+                $statement,
+                $table,
+                $operationName,
+                $rowsReturned,
+                $rowsAffected,
+                0,
+                $wasteQueries
+            ),
+            databasePerformanceAttributes($durationMs)
         ),
     ];
 }
@@ -684,33 +744,49 @@ function queryMysql(bool $forceFailure = false): array
 function queryPostgres(bool $forceFailure = false): array
 {
     $queryStart = microtime(true);
+    $connectStart = microtime(true);
     $pdo = new PDO(
         getenv('POSTGRES_DSN') ?: 'pgsql:host=postgres;port=5432;dbname=recommendations',
         getenv('POSTGRES_USER') ?: 'app',
         getenv('POSTGRES_PASSWORD') ?: 'app',
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
     );
+    $connectionWaitMs = round((microtime(true) - $connectStart) * 1000, 2);
 
     $wasteQueries = 0;
     $transactionId = 'postgres-tx-' . bin2hex(random_bytes(4));
     $lockTarget = 'users.id=1';
     $operationSequence = [];
     $lastQueryType = 'read';
+    $transactionStart = null;
+    $statement = 'SELECT COUNT(*) AS recommendation_count FROM recommendations';
+    $table = 'recommendations';
+    $operationName = 'SELECT';
+    $rowsReturned = 0;
+    $rowsAffected = 0;
 
     if (isDbBottleneckModeEnabled()) {
         try {
             $pdo->beginTransaction();
+            $transactionStart = microtime(true);
             $operationSequence[] = 'begin_transaction';
 
+            $statement = 'SELECT id FROM users WHERE id = 1 FOR UPDATE';
+            $table = 'users';
+            $operationName = 'SELECT';
             $stmt = $pdo->query('SELECT id FROM users WHERE id = 1 FOR UPDATE');
-            $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $lockedRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $rowsReturned = count($lockedRows);
             $stmt->closeCursor();
             $wasteQueries++;
             $lastQueryType = 'select_for_update';
             $operationSequence[] = 'lock_user_row';
 
+            $statement = 'SELECT pg_sleep(0.15)';
+            $operationName = 'SELECT';
             $stmt = $pdo->query('SELECT pg_sleep(0.15)');
-            $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $sleepRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $rowsReturned = count($sleepRows);
             $stmt->closeCursor();
             $wasteQueries++;
             $lastQueryType = 'sleep';
@@ -718,9 +794,13 @@ function queryPostgres(bool $forceFailure = false): array
 
             for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
                 $userId = ($i % 3) + 1;
+                $statement = 'SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id';
+                $table = 'recommendations';
+                $operationName = 'SELECT';
                 $stmt = $pdo->prepare('SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id');
                 $stmt->execute(['user_id' => $userId]);
                 $stmt->fetchColumn();
+                $rowsReturned = 1;
                 $stmt->closeCursor();
                 $wasteQueries++;
                 $lastQueryType = 'select_count';
@@ -738,14 +818,30 @@ function queryPostgres(bool $forceFailure = false): array
                         'db.lock_target' => $lockTarget,
                         'db.operation_sequence' => implode(' > ', $operationSequence),
                         'db.transaction.stage' => 'deadlock',
+                        ...databaseObservedAttributes(
+                            $durationMs,
+                            $connectionWaitMs,
+                            $transactionStart,
+                            $statement,
+                            $table,
+                            $operationName,
+                            $rowsReturned,
+                            $rowsAffected,
+                            0,
+                            $wasteQueries
+                        ),
                     ], databasePerformanceAttributes(
                         $durationMs
                     ))
                 );
             }
 
+            $statement = 'SELECT COUNT(*) AS recommendation_count FROM recommendations';
+            $table = 'recommendations';
+            $operationName = 'SELECT';
             $stmt = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations');
             $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $rowsReturned = $row === [] ? 0 : 1;
             $stmt->closeCursor();
             $lastQueryType = 'select_aggregate';
             $operationSequence[] = 'aggregate_recommendations';
@@ -763,14 +859,30 @@ function queryPostgres(bool $forceFailure = false): array
                 'db.transaction_id' => $transactionId,
                 'db.lock_target' => $lockTarget,
                 'db.operation_sequence' => implode(' > ', $operationSequence),
+                ...databaseObservedAttributes(
+                    round((microtime(true) - $queryStart) * 1000, 2),
+                    $connectionWaitMs,
+                    $transactionStart,
+                    $statement,
+                    $table,
+                    $operationName,
+                    $rowsReturned,
+                    $rowsAffected,
+                    0,
+                    $wasteQueries
+                ),
                 ...databasePerformanceAttributes(
                     round((microtime(true) - $queryStart) * 1000, 2)
                 ),
             ]);
         }
     } else {
+        $statement = 'SELECT COUNT(*) AS recommendation_count FROM recommendations';
+        $table = 'recommendations';
+        $operationName = 'SELECT';
         $stmt = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations');
         $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $rowsReturned = $row === [] ? 0 : 1;
         $stmt->closeCursor();
     }
 
@@ -778,8 +890,20 @@ function queryPostgres(bool $forceFailure = false): array
     return [
         'recommendation_count' => (int) ($row['recommendation_count'] ?? 0),
         'waste_queries' => $wasteQueries,
-        '_telemetry' => databasePerformanceAttributes(
-            $durationMs
+        '_telemetry' => array_merge(
+            databaseObservedAttributes(
+                $durationMs,
+                $connectionWaitMs,
+                $transactionStart,
+                $statement,
+                $table,
+                $operationName,
+                $rowsReturned,
+                $rowsAffected,
+                0,
+                $wasteQueries
+            ),
+            databasePerformanceAttributes($durationMs)
         ),
     ];
 }
@@ -787,12 +911,17 @@ function queryPostgres(bool $forceFailure = false): array
 function queryRedis(bool $forceFailure = false): array
 {
     $queryStart = microtime(true);
+    $connectStart = microtime(true);
     $redis = new Redis();
     $redis->connect(getenv('REDIS_HOST') ?: 'redis', (int) (getenv('REDIS_PORT') ?: 6379), 1.5);
+    $connectionWaitMs = round((microtime(true) - $connectStart) * 1000, 2);
 
     $loops = max(1, min((int) (getenv('APP_REDIS_BOTTLENECK_LOOPS') ?: 20), 200));
     $wasteOps = 0;
     $retryConflicts = 0;
+    $statement = 'WATCH redis:hotspot:counter -> MULTI -> SET -> EXPIRE -> EXEC';
+    $table = 'redis:hotspot:counter';
+    $operationName = 'WATCH_MULTI_EXEC';
 
     $redis->set('php:last_seen', gmdate('c'));
     $hotKey = 'redis:hotspot:counter';
@@ -826,6 +955,18 @@ function queryRedis(bool $forceFailure = false): array
             'db.transaction_id' => 'redis-tx-' . bin2hex(random_bytes(4)),
             'db.lock_target' => $hotKey,
             'db.operation_sequence' => 'watch > multi > set > expire > exec',
+            ...databaseObservedAttributes(
+                round((microtime(true) - $queryStart) * 1000, 2),
+                $connectionWaitMs,
+                $queryStart,
+                $statement,
+                $table,
+                $operationName,
+                0,
+                0,
+                $retryConflicts,
+                $wasteOps
+            ),
             ...databasePerformanceAttributes(
                 round((microtime(true) - $queryStart) * 1000, 2)
             ),
@@ -838,8 +979,20 @@ function queryRedis(bool $forceFailure = false): array
         'php_last_seen' => (string) $redis->get('php:last_seen'),
         'redis_waste_ops' => $wasteOps,
         'redis_tx_conflicts' => $retryConflicts,
-        '_telemetry' => databasePerformanceAttributes(
-            $durationMs
+        '_telemetry' => array_merge(
+            databaseObservedAttributes(
+                $durationMs,
+                $connectionWaitMs,
+                $queryStart,
+                $statement,
+                $table,
+                $operationName,
+                0,
+                0,
+                $retryConflicts,
+                $wasteOps
+            ),
+            databasePerformanceAttributes($durationMs)
         ),
     ];
 }
@@ -849,6 +1002,31 @@ function databasePerformanceAttributes(float $durationMs): array
     return [
         'db.query.duration' => $durationMs,
         'db.response_time_ms' => $durationMs,
+    ];
+}
+
+function databaseObservedAttributes(
+    float $durationMs,
+    float $connectionWaitMs,
+    ?float $transactionStart,
+    string $statement,
+    string $table,
+    string $operationName,
+    int $rowsReturned,
+    int $rowsAffected,
+    int $retryCount,
+    int $operationCount
+): array {
+    return [
+        'db.connection.wait_ms' => $connectionWaitMs,
+        'db.transaction.duration_ms' => $transactionStart !== null ? round((microtime(true) - $transactionStart) * 1000, 2) : $durationMs,
+        'db.operation.name' => $operationName,
+        'db.sql.table' => $table,
+        'db.statement' => $statement,
+        'db.rows_returned' => $rowsReturned,
+        'db.rows_affected' => $rowsAffected,
+        'db.retry_count' => $retryCount,
+        'db.operation_count' => $operationCount,
     ];
 }
 
@@ -2480,14 +2658,17 @@ function describeThrowable(Throwable $error): array
   }
 
   $context = extractThrowableContext($error);
+  $errorCode = is_int($error->getCode()) || is_string($error->getCode()) ? (string) $error->getCode() : '';
 
   return [
     'error.type' => get_class($error),
+    'error.code' => $errorCode,
     'error.message' => $error->getMessage(),
     'error.function' => $function,
     'error.file' => $error->getFile(),
     'error.line' => $error->getLine(),
     'exception.type' => get_class($error),
+    'exception.code' => $errorCode,
     'exception.message' => $error->getMessage(),
     'exception.stacktrace' => $error->getTraceAsString(),
     'code.function.name' => $function,
