@@ -1377,13 +1377,15 @@ function renderIndex(): string
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
     }
     .toolbar > * {
       min-width: 0;
     }
     #search {
-      flex: 1 1 auto;
+      flex: 1 1 320px;
       max-width: 100%;
+      min-width: 0;
     }
     #category {
       flex: 0 0 210px;
@@ -1536,6 +1538,38 @@ function renderIndex(): string
       gap: 6px;
       font-size: 0.9rem;
     }
+    .section-meta {
+      margin: -2px 0 2px;
+      font-size: 0.8rem;
+      color: rgba(25,35,44,0.65);
+    }
+    .rec-card, .order-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px;
+      background: #fff;
+    }
+    .rec-head, .order-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+    }
+    .rec-score {
+      font-weight: 800;
+      color: var(--ok);
+    }
+    .rec-reason, .order-meta, .order-items {
+      margin: 4px 0 0;
+      color: rgba(25,35,44,.72);
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+    .orders-list {
+      max-height: 380px;
+      overflow: auto;
+      padding-right: 2px;
+    }
     .log {
       background: #0f1720;
       color: #e4ecf4;
@@ -1555,9 +1589,15 @@ function renderIndex(): string
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
       .hero-top { align-items: flex-start; }
+      .toolbar {
+        align-items: stretch;
+      }
+      #search {
+        flex-basis: 100%;
+      }
       #category {
-        flex-basis: 160px;
-        max-width: 160px;
+        flex: 1 1 100%;
+        max-width: 100%;
       }
     }
   </style>
@@ -1615,11 +1655,13 @@ function renderIndex(): string
 
         <div class="section-box">
           <p class="mini-title">Aanbevelingen</p>
+          <p class="section-meta" id="recs-meta">Nog geen aanbevelingen geladen.</p>
           <ul class="rec-list" id="recs"><li>Nog geen aanbevelingen geladen.</li></ul>
         </div>
 
         <div class="section-box">
           <p class="mini-title">Mijn bestellingen</p>
+          <p class="section-meta" id="orders-meta">Log in om je bestellingen te zien.</p>
           <ul class="orders-list" id="orders"><li>Log in om je bestellingen te zien.</li></ul>
         </div>
 
@@ -1643,7 +1685,9 @@ function renderIndex(): string
     const grid = document.getElementById('grid');
     const cartBox = document.getElementById('cart');
     const recsBox = document.getElementById('recs');
+    const recsMeta = document.getElementById('recs-meta');
     const ordersBox = document.getElementById('orders');
+    const ordersMeta = document.getElementById('orders-meta');
     const logBox = document.getElementById('log');
     const heroUser = document.getElementById('hero-user');
     const authLink = document.getElementById('auth-link');
@@ -1654,6 +1698,9 @@ function renderIndex(): string
     const kpiLat = document.getElementById('kpi-lat');
     const searchInput = document.getElementById('search');
     const categoryInput = document.getElementById('category');
+    const summaryButton = document.getElementById('btn-summary');
+    let lastSummary = null;
+    let recommendationRefreshCount = 0;
 
     function euro(value) {
       return Number(value).toFixed(2);
@@ -1758,6 +1805,53 @@ function renderIndex(): string
       });
     }
 
+    function productForSku(sku) {
+      return products.find((item) => item.sku === sku) || null;
+    }
+
+    function buildFallbackRecommendations() {
+      return products.map((item, index) => ({
+        sku: item.sku,
+        score: Math.max(0.45, 0.96 - index * 0.07),
+        tier: 'fallback',
+      }));
+    }
+
+    function deriveRecommendations(summary, refreshCount) {
+      const base = extractRecommendations(summary);
+      const sourceItems = base.length > 0 ? base : buildFallbackRecommendations();
+      const term = searchInput.value.trim().toLowerCase();
+      const activeCategory = categoryInput.value;
+      const cartSkus = new Set(cartPayload().map((item) => item.sku));
+      const cartCategories = new Set(
+        [...cartSkus].map((sku) => productForSku(sku)).filter(Boolean).map((item) => item.category)
+      );
+
+      return sourceItems.map((item, index) => {
+        const product = productForSku(item.sku || '');
+        const baseScore = Number(item.score || 0);
+        const categoryBoost = product && activeCategory !== 'all' && product.category === activeCategory ? 0.16 : 0;
+        const termBoost = product && term !== '' && `${product.name} ${product.category} ${product.sku}`.toLowerCase().includes(term) ? 0.18 : 0;
+        const affinityBoost = product && cartCategories.has(product.category) ? 0.13 : 0;
+        const noveltyBoost = cartSkus.has(item.sku) ? -0.22 : 0.05;
+        const refreshBoost = ((refreshCount + index) % 5) * 0.03;
+        const score = baseScore + categoryBoost + termBoost + affinityBoost + noveltyBoost + refreshBoost;
+        const reasons = [];
+        if (termBoost > 0) reasons.push('matcht je zoekterm');
+        if (categoryBoost > 0) reasons.push('past bij je categorie');
+        if (affinityBoost > 0) reasons.push('sluit aan op je winkelwagen');
+        if (reasons.length === 0) reasons.push(refreshCount > 0 ? 'opnieuw gerankt na verversen' : 'algemene aanbeveling');
+
+        return {
+          ...item,
+          name: product ? product.name : (item.sku || 'Onbekend product'),
+          category: product ? product.category : '',
+          score,
+          reason: reasons.join(' • '),
+        };
+      }).sort((a, b) => b.score - a.score);
+    }
+
     async function requestJson(path, method = 'GET', body) {
       const response = await fetch(path, {
         method,
@@ -1791,37 +1885,50 @@ function renderIndex(): string
       return [];
     }
 
-    function renderRecommendations(items) {
+    function renderRecommendations(items, refreshCount = recommendationRefreshCount) {
       if (!items || items.length === 0) {
+        recsMeta.textContent = 'Geen aanbevelingen beschikbaar.';
         recsBox.innerHTML = '<li>Geen aanbevelingen beschikbaar.</li>';
         return;
       }
 
+      recsMeta.textContent = refreshCount > 0
+        ? `Aanbevelingen opnieuw gerankt op basis van je filters en winkelwagen (${refreshCount}x ververst).`
+        : 'Live aanbevelingen op basis van de huidige storefront-state.';
+
       recsBox.innerHTML = items.slice(0, 6).map((item) => `
-        <li style="display:flex;justify-content:space-between;gap:8px;border:1px solid var(--line);border-radius:8px;padding:7px;">
-          <span>${item.sku || 'SKU'} <small style="color:rgba(25,35,44,.65)">${item.tier || ''}</small></span>
-          <strong>${Number(item.score || 0).toFixed(2)}</strong>
+        <li class="rec-card">
+          <div class="rec-head">
+            <strong>${item.name || item.sku || 'SKU'}</strong>
+            <span class="rec-score">${Number(item.score || 0).toFixed(2)}</span>
+          </div>
+          <div class="order-meta">${item.sku || 'SKU'}${item.category ? ` • ${item.category}` : ''}${item.tier ? ` • ${item.tier}` : ''}</div>
+          <p class="rec-reason">${item.reason || 'Aanbeveling beschikbaar.'}</p>
         </li>
       `).join('');
     }
 
     function renderOrders(orders) {
       if (!currentUser) {
+        ordersMeta.textContent = 'Log in om je bestellingen te zien.';
         ordersBox.innerHTML = '<li>Log in om je bestellingen te zien.</li>';
         return;
       }
       if (!orders || orders.length === 0) {
+        ordersMeta.textContent = 'Nog geen bestellingen geplaatst.';
         ordersBox.innerHTML = '<li>Nog geen bestellingen geplaatst.</li>';
         return;
       }
 
-      ordersBox.innerHTML = orders.slice(0, 5).map((order) => `
-        <li style="border:1px solid var(--line);border-radius:8px;padding:8px;">
-          <div style="display:flex;justify-content:space-between;gap:8px;">
+      ordersMeta.textContent = `${orders.length} bestellingen geladen. Nieuwste bovenaan.`;
+      ordersBox.innerHTML = orders.map((order) => `
+        <li class="order-card">
+          <div class="order-head">
             <strong>${order.order_id}</strong>
             <span>${order.status}</span>
           </div>
-          <div style="font-size:.82rem;color:rgba(25,35,44,.72)">EUR ${euro(order.total_amount)} • ${new Date(order.created_at).toLocaleString()}</div>
+          <p class="order-meta">EUR ${euro(order.total_amount)} • ${new Date(order.created_at).toLocaleString()} • ${order.items.length} regels</p>
+          <div class="order-items">${order.items.map((item) => `${item.quantity}x ${item.name} (${item.sku})`).join(' • ')}</div>
         </li>
       `).join('');
     }
@@ -1834,6 +1941,7 @@ function renderIndex(): string
         logoutButton.hidden = true;
         checkoutButton.disabled = true;
         checkoutButton.title = 'Log eerst in om te bestellen';
+        ordersMeta.textContent = 'Log in om je bestellingen te zien.';
         renderOrders([]);
         return;
       }
@@ -1879,18 +1987,25 @@ function renderIndex(): string
 
     async function refreshSummary(title = 'summary:refresh') {
       const start = performance.now();
+      summaryButton.disabled = true;
+      summaryButton.textContent = 'Verversen...';
       try {
-        const { payload, status } = await requestJson('/api/summary');
+        const { payload, status } = await requestJson(`/api/summary?refresh=${Date.now()}&view=${recommendationRefreshCount}`);
+        lastSummary = payload;
         setKpis(performance.now() - start);
-        renderRecommendations(extractRecommendations(payload));
+        renderRecommendations(deriveRecommendations(payload, recommendationRefreshCount), recommendationRefreshCount);
         appendLog(`${title} (${status})`, {
           component_errors: payload.component_errors,
           degraded: payload.degraded,
-          recommendations: extractRecommendations(payload).length,
+          recommendations: deriveRecommendations(payload, recommendationRefreshCount).length,
+          refresh_count: recommendationRefreshCount,
         });
       } catch (error) {
         setKpis(performance.now() - start);
         appendLog(`${title} (failed)`, { error: error.message });
+      } finally {
+        summaryButton.disabled = false;
+        summaryButton.textContent = 'Ververs aanbevelingen';
       }
     }
 
@@ -1921,7 +2036,9 @@ function renderIndex(): string
         cart.clear();
         renderCart();
         await refreshOrders();
-        renderRecommendations(extractRecommendations(payload));
+        lastSummary = payload;
+        recommendationRefreshCount += 1;
+        renderRecommendations(deriveRecommendations(payload, recommendationRefreshCount), recommendationRefreshCount);
       } catch (error) {
         setKpis(performance.now() - start);
         appendLog('checkout:failed', { error: error.message });
@@ -1953,6 +2070,7 @@ function renderIndex(): string
     }
 
     document.getElementById('btn-summary').addEventListener('click', () => {
+      recommendationRefreshCount += 1;
       refreshSummary('manual:summary');
     });
 
@@ -1989,11 +2107,17 @@ function renderIndex(): string
 
     searchInput.addEventListener('input', () => {
       renderGrid();
+      if (lastSummary) {
+        renderRecommendations(deriveRecommendations(lastSummary, recommendationRefreshCount), recommendationRefreshCount);
+      }
       triggerBrowseTelemetry();
     });
 
     categoryInput.addEventListener('change', () => {
       renderGrid();
+      if (lastSummary) {
+        renderRecommendations(deriveRecommendations(lastSummary, recommendationRefreshCount), recommendationRefreshCount);
+      }
       triggerBrowseTelemetry();
     });
 
