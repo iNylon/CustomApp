@@ -269,9 +269,21 @@ def recommendations():
             }
             cache.setex(cache_key, 5 if DB_BOTTLENECK_MODE else 20, json.dumps(payload))
 
+            if request.args.get("fail") == "1":
+                raise attach_error_context(
+                    RuntimeError("python recommendation ranking failed while composing response"),
+                    **{
+                        "db.system": "postgresql",
+                        "db.query_type": last_query_type,
+                        "db.transaction_id": transaction_id,
+                        "db.lock_target": "users.id=1",
+                        "db.operation_sequence": " > ".join(operation_sequence),
+                    },
+                )
+
             if random.randint(1, 100) <= 12:
                 raise attach_error_context(
-                    RuntimeError("synthetic python recommendation failure"),
+                    RuntimeError("python recommendation ranking failed while composing response"),
                     **{
                         "db.system": "postgresql",
                         "db.query_type": last_query_type,

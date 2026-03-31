@@ -122,11 +122,12 @@ public final class App {
         jedis.set("java:last_quote", Instant.now().toString());
         double quote = 29.99 + RANDOM.nextInt(60);
         boolean failure = RANDOM.nextInt(100) < Math.max(0, Math.min(FAILURE_RATE_PERCENT, 100));
+        boolean forceFailure = "fail=1".equals(exchange.getRequestURI().getQuery());
 
         requestCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
-        if (failure) {
+        if (forceFailure || failure) {
           errorCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
-          throw new RuntimeException("synthetic java checkout failure");
+          throw new RuntimeException("java checkout quote computation failed");
         }
 
         String body = "{\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\",\"quote\":" + quote + ",\"redis_marker\":\"" + jedis.get("java:last_quote") + "\"}";

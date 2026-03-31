@@ -172,9 +172,19 @@ app.get('/inventory', async (req, res) => {
       const wasteQueryCount = dbBottleneckMode ? await induceMysqlBottleneck(rows) : 0;
       await redis.set('node:last_inventory_fetch', new Date().toISOString());
 
+      if (req.query.fail === '1') {
+        throw attachErrorContext(new Error('node inventory lookup failed during catalog processing'), {
+          'root_cause.layer': 'application',
+          'root_cause.component': serviceName,
+          'root_cause.reason': 'application_runtime_failure',
+          'root_cause.summary': 'Node catalog service raised an application exception while serving inventory',
+          'root_cause.confidence': 'high',
+        });
+      }
+
       if (Math.random() < 0.1) {
         errorCounter.add(1, { route: '/inventory' });
-        throw new Error('synthetic node inventory failure');
+        throw new Error('node inventory lookup failed during catalog processing');
       }
 
       res.json({

@@ -267,8 +267,19 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
       return;
     }
 
-    if ($path === '/api/error') {
-      triggerIntentionalErrorPath();
+    if (preg_match('#^/api/fault/(mysql|postgres|redis|php|python|java|nodejs)$#', $path, $matches) === 1 && $method === 'POST') {
+      $target = $matches[1];
+      $payload = triggerFault($target, $logger, $emitter, $rootSpan);
+      sendJson(200, $payload);
+      finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Fault trigger executed', [
+        'fault.target' => $target,
+        'fault.ok' => (bool) ($payload['ok'] ?? false),
+      ]);
+      finishRootSpan($emitter, $rootSpan, $path, 200, [
+        'fault.target' => $target,
+        'fault.ok' => (bool) ($payload['ok'] ?? false),
+      ]);
+      return;
     }
 
     if ($path === '/api/summary' && $method === 'GET') {
@@ -620,7 +631,7 @@ function classifyProbeFailure(string $name, array $extraAttributes, array $error
   ];
 }
 
-function queryMysql(): array
+function queryMysql(bool $forceFailure = false): array
 {
     $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
     if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
@@ -671,9 +682,9 @@ function queryMysql(): array
                 $operationSequence[] = 'count_by_category:' . $category;
             }
 
-            if (random_int(1, 100) <= 14) {
-                throw buildSyntheticDatabaseException(
-                    'synthetic mysql lock wait timeout',
+            if ($forceFailure || random_int(1, 100) <= 14) {
+                throw buildDatabaseException(
+                    'mysql lock wait timeout while loading catalog inventory',
                     [
                         'db.system' => 'mysql',
                         'db.query_type' => 'select_for_update',
@@ -719,7 +730,7 @@ function queryMysql(): array
     ];
 }
 
-function queryPostgres(): array
+function queryPostgres(bool $forceFailure = false): array
 {
     $pdo = new PDO(
         getenv('POSTGRES_DSN') ?: 'pgsql:host=postgres;port=5432;dbname=recommendations',
@@ -764,9 +775,9 @@ function queryPostgres(): array
                 $operationSequence[] = 'count_recommendations:' . $userId;
             }
 
-            if (random_int(1, 100) <= 14) {
-                throw buildSyntheticDatabaseException(
-                    'synthetic postgres deadlock detected',
+            if ($forceFailure || random_int(1, 100) <= 14) {
+                throw buildDatabaseException(
+                    'postgres transaction deadlock while loading recommendations',
                     [
                         'db.system' => 'postgresql',
                         'db.query_type' => 'select_for_update',
@@ -811,7 +822,7 @@ function queryPostgres(): array
     ];
 }
 
-function queryRedis(): array
+function queryRedis(bool $forceFailure = false): array
 {
     $redis = new Redis();
     $redis->connect(getenv('REDIS_HOST') ?: 'redis', (int) (getenv('REDIS_PORT') ?: 6379), 1.5);
@@ -845,8 +856,14 @@ function queryRedis(): array
         }
     }
 
-    if (isDbBottleneckModeEnabled() && $retryConflicts >= max(2, (int) floor($loops * 0.25))) {
-        throw new RuntimeException('synthetic redis transaction conflicts exceeded threshold');
+    if ($forceFailure || (isDbBottleneckModeEnabled() && $retryConflicts >= max(2, (int) floor($loops * 0.25)))) {
+        throw enrichThrowable(new RuntimeException('redis transaction conflicts exceeded retry threshold'), [
+            'db.system' => 'redis',
+            'db.query_type' => 'watch_multi_exec',
+            'db.transaction_id' => 'redis-tx-' . bin2hex(random_bytes(4)),
+            'db.lock_target' => $hotKey,
+            'db.operation_sequence' => 'watch > multi > set > expire > exec',
+        ]);
     }
 
     return [
@@ -1372,12 +1389,18 @@ function renderIndex(): string
       padding: 16px;
       display: grid;
       gap: 12px;
+      align-content: start;
     }
     .toolbar {
       display: flex;
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
+      position: sticky;
+      top: 12px;
+      z-index: 6;
+      padding: 4px 0 12px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.92));
     }
     .toolbar > * {
       min-width: 0;
@@ -1462,7 +1485,6 @@ function renderIndex(): string
     .btn-main { background: var(--accent); color: #fff; }
     .btn-sub { background: #1f685a; color: #fff; }
     .btn-clear { background: #ebebeb; color: #242424; }
-    .btn-alert { background: var(--warn); color: #fff; }
     .side {
       padding: 14px;
       display: grid;
@@ -1530,7 +1552,46 @@ function renderIndex(): string
       display: grid;
       gap: 7px;
     }
-    .rec-list, .orders-list {
+    .fault-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .fault-button {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      justify-content: flex-start;
+      background: #fff;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+    }
+    .fault-button:hover {
+      filter: brightness(0.98);
+    }
+    .tech-icon {
+      flex: 0 0 32px;
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.72rem;
+      font-weight: 800;
+      color: #fff;
+      letter-spacing: 0.01em;
+    }
+    .tech-icon.mysql { background: linear-gradient(135deg, #00546b, #0a88a8); }
+    .tech-icon.postgres { background: linear-gradient(135deg, #1d4f91, #4b7ed1); }
+    .tech-icon.redis { background: linear-gradient(135deg, #8d0e13, #d82c20); }
+    .tech-icon.php { background: linear-gradient(135deg, #5f6fb2, #8892bf); }
+    .tech-icon.python { background: linear-gradient(135deg, #3673a5, #ffd43b); color: #13233a; }
+    .tech-icon.java { background: linear-gradient(135deg, #d66a2a, #f2a348); }
+    .tech-icon.nodejs { background: linear-gradient(135deg, #2f7d32, #68a063); }
+    .orders-list {
       margin: 0;
       padding: 0;
       list-style: none;
@@ -1543,23 +1604,19 @@ function renderIndex(): string
       font-size: 0.8rem;
       color: rgba(25,35,44,0.65);
     }
-    .rec-card, .order-card {
+    .order-card {
       border: 1px solid var(--line);
       border-radius: 10px;
       padding: 9px;
       background: #fff;
     }
-    .rec-head, .order-head {
+    .order-head {
       display: flex;
       justify-content: space-between;
       gap: 8px;
       align-items: baseline;
     }
-    .rec-score {
-      font-weight: 800;
-      color: var(--ok);
-    }
-    .rec-reason, .order-meta, .order-items {
+    .order-meta, .order-items {
       margin: 4px 0 0;
       color: rgba(25,35,44,.72);
       font-size: 0.82rem;
@@ -1598,6 +1655,9 @@ function renderIndex(): string
       #category {
         flex: 1 1 100%;
         max-width: 100%;
+      }
+      .fault-grid {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -1647,16 +1707,20 @@ function renderIndex(): string
         </div>
 
         <div class="checkout">
-          <button class="btn-main" id="btn-summary">Ververs aanbevelingen</button>
           <button class="btn-sub" id="btn-checkout">Bestelling afronden</button>
-          <button class="btn-clear" id="btn-chaos">Trigger foutpad</button>
-          <button class="btn-alert" id="btn-alert">Trigger alert</button>
         </div>
 
         <div class="section-box">
-          <p class="mini-title">Aanbevelingen</p>
-          <p class="section-meta" id="recs-meta">Nog geen aanbevelingen geladen.</p>
-          <ul class="rec-list" id="recs"><li>Nog geen aanbevelingen geladen.</li></ul>
+          <p class="mini-title">Storingen simuleren</p>
+          <div class="fault-grid" id="fault-grid">
+            <button class="fault-button" data-fault="mysql"><span class="tech-icon mysql">My</span><span>Trigger MySQL fout</span></button>
+            <button class="fault-button" data-fault="postgres"><span class="tech-icon postgres">PG</span><span>Trigger PostgreSQL fout</span></button>
+            <button class="fault-button" data-fault="redis"><span class="tech-icon redis">R</span><span>Trigger Redis fout</span></button>
+            <button class="fault-button" data-fault="php"><span class="tech-icon php">PHP</span><span>Trigger PHP fout</span></button>
+            <button class="fault-button" data-fault="python"><span class="tech-icon python">Py</span><span>Trigger Python fout</span></button>
+            <button class="fault-button" data-fault="java"><span class="tech-icon java">J</span><span>Trigger Java fout</span></button>
+            <button class="fault-button" data-fault="nodejs"><span class="tech-icon nodejs">JS</span><span>Trigger NodeJS fout</span></button>
+          </div>
         </div>
 
         <div class="section-box">
@@ -1684,8 +1748,6 @@ function renderIndex(): string
     let currentUser = null;
     const grid = document.getElementById('grid');
     const cartBox = document.getElementById('cart');
-    const recsBox = document.getElementById('recs');
-    const recsMeta = document.getElementById('recs-meta');
     const ordersBox = document.getElementById('orders');
     const ordersMeta = document.getElementById('orders-meta');
     const logBox = document.getElementById('log');
@@ -1698,9 +1760,7 @@ function renderIndex(): string
     const kpiLat = document.getElementById('kpi-lat');
     const searchInput = document.getElementById('search');
     const categoryInput = document.getElementById('category');
-    const summaryButton = document.getElementById('btn-summary');
-    let lastSummary = null;
-    let recommendationRefreshCount = 0;
+    const faultButtons = [...document.querySelectorAll('button[data-fault]')];
 
     function euro(value) {
       return Number(value).toFixed(2);
@@ -1805,53 +1865,6 @@ function renderIndex(): string
       });
     }
 
-    function productForSku(sku) {
-      return products.find((item) => item.sku === sku) || null;
-    }
-
-    function buildFallbackRecommendations() {
-      return products.map((item, index) => ({
-        sku: item.sku,
-        score: Math.max(0.45, 0.96 - index * 0.07),
-        tier: 'fallback',
-      }));
-    }
-
-    function deriveRecommendations(summary, refreshCount) {
-      const base = extractRecommendations(summary);
-      const sourceItems = base.length > 0 ? base : buildFallbackRecommendations();
-      const term = searchInput.value.trim().toLowerCase();
-      const activeCategory = categoryInput.value;
-      const cartSkus = new Set(cartPayload().map((item) => item.sku));
-      const cartCategories = new Set(
-        [...cartSkus].map((sku) => productForSku(sku)).filter(Boolean).map((item) => item.category)
-      );
-
-      return sourceItems.map((item, index) => {
-        const product = productForSku(item.sku || '');
-        const baseScore = Number(item.score || 0);
-        const categoryBoost = product && activeCategory !== 'all' && product.category === activeCategory ? 0.16 : 0;
-        const termBoost = product && term !== '' && `${product.name} ${product.category} ${product.sku}`.toLowerCase().includes(term) ? 0.18 : 0;
-        const affinityBoost = product && cartCategories.has(product.category) ? 0.13 : 0;
-        const noveltyBoost = cartSkus.has(item.sku) ? -0.22 : 0.05;
-        const refreshBoost = ((refreshCount + index) % 5) * 0.03;
-        const score = baseScore + categoryBoost + termBoost + affinityBoost + noveltyBoost + refreshBoost;
-        const reasons = [];
-        if (termBoost > 0) reasons.push('matcht je zoekterm');
-        if (categoryBoost > 0) reasons.push('past bij je categorie');
-        if (affinityBoost > 0) reasons.push('sluit aan op je winkelwagen');
-        if (reasons.length === 0) reasons.push(refreshCount > 0 ? 'opnieuw gerankt na verversen' : 'algemene aanbeveling');
-
-        return {
-          ...item,
-          name: product ? product.name : (item.sku || 'Onbekend product'),
-          category: product ? product.category : '',
-          score,
-          reason: reasons.join(' • '),
-        };
-      }).sort((a, b) => b.score - a.score);
-    }
-
     async function requestJson(path, method = 'GET', body) {
       const response = await fetch(path, {
         method,
@@ -1872,40 +1885,6 @@ function renderIndex(): string
       }
 
       return { payload, status: response.status };
-    }
-
-    function extractRecommendations(summary) {
-      const source = summary && summary.recommendations ? summary.recommendations : {};
-      if (Array.isArray(source.items)) {
-        return source.items;
-      }
-      if (source.payload && Array.isArray(source.payload.items)) {
-        return source.payload.items;
-      }
-      return [];
-    }
-
-    function renderRecommendations(items, refreshCount = recommendationRefreshCount) {
-      if (!items || items.length === 0) {
-        recsMeta.textContent = 'Geen aanbevelingen beschikbaar.';
-        recsBox.innerHTML = '<li>Geen aanbevelingen beschikbaar.</li>';
-        return;
-      }
-
-      recsMeta.textContent = refreshCount > 0
-        ? `Aanbevelingen opnieuw gerankt op basis van je filters en winkelwagen (${refreshCount}x ververst).`
-        : 'Live aanbevelingen op basis van de huidige storefront-state.';
-
-      recsBox.innerHTML = items.slice(0, 6).map((item) => `
-        <li class="rec-card">
-          <div class="rec-head">
-            <strong>${item.name || item.sku || 'SKU'}</strong>
-            <span class="rec-score">${Number(item.score || 0).toFixed(2)}</span>
-          </div>
-          <div class="order-meta">${item.sku || 'SKU'}${item.category ? ` • ${item.category}` : ''}${item.tier ? ` • ${item.tier}` : ''}</div>
-          <p class="rec-reason">${item.reason || 'Aanbeveling beschikbaar.'}</p>
-        </li>
-      `).join('');
     }
 
     function renderOrders(orders) {
@@ -1939,8 +1918,8 @@ function renderIndex(): string
         heroUser.textContent = 'Niet ingelogd';
         authLink.hidden = false;
         logoutButton.hidden = true;
-        checkoutButton.disabled = true;
-        checkoutButton.title = 'Log eerst in om te bestellen';
+        checkoutButton.disabled = false;
+        checkoutButton.title = 'Log in om je bestelling af te ronden';
         ordersMeta.textContent = 'Log in om je bestellingen te zien.';
         renderOrders([]);
         return;
@@ -1985,27 +1964,23 @@ function renderIndex(): string
       }
     }
 
-    async function refreshSummary(title = 'summary:refresh') {
-      const start = performance.now();
-      summaryButton.disabled = true;
-      summaryButton.textContent = 'Verversen...';
+    async function triggerFault(target, button) {
+      const original = button.innerHTML;
+      button.disabled = true;
+      button.innerHTML = `${original}`;
       try {
-        const { payload, status } = await requestJson(`/api/summary?refresh=${Date.now()}&view=${recommendationRefreshCount}`);
-        lastSummary = payload;
-        setKpis(performance.now() - start);
-        renderRecommendations(deriveRecommendations(payload, recommendationRefreshCount), recommendationRefreshCount);
-        appendLog(`${title} (${status})`, {
-          component_errors: payload.component_errors,
-          degraded: payload.degraded,
-          recommendations: deriveRecommendations(payload, recommendationRefreshCount).length,
-          refresh_count: recommendationRefreshCount,
+        const { payload } = await requestJson(`/api/fault/${target}`, 'POST');
+        appendLog('fault:triggered', {
+          target,
+          ok: payload.ok,
+          error: payload.error || '',
+          status_code: payload.status_code || 0,
         });
       } catch (error) {
-        setKpis(performance.now() - start);
-        appendLog(`${title} (failed)`, { error: error.message });
+        appendLog('fault:trigger-failed', { target, error: error.message });
       } finally {
-        summaryButton.disabled = false;
-        summaryButton.textContent = 'Ververs aanbevelingen';
+        button.disabled = false;
+        button.innerHTML = original;
       }
     }
 
@@ -2036,55 +2011,20 @@ function renderIndex(): string
         cart.clear();
         renderCart();
         await refreshOrders();
-        lastSummary = payload;
-        recommendationRefreshCount += 1;
-        renderRecommendations(deriveRecommendations(payload, recommendationRefreshCount), recommendationRefreshCount);
       } catch (error) {
         setKpis(performance.now() - start);
         appendLog('checkout:failed', { error: error.message });
       }
     }
 
-    async function triggerAlertBurst() {
-      const alertButton = document.getElementById('btn-alert');
-      const burstSize = 8;
-      alertButton.disabled = true;
-      alertButton.textContent = 'Triggering...';
-
-      const jobs = Array.from({ length: burstSize }, () =>
-        fetch('/api/error', { method: 'GET' })
-          .then((response) => response.status)
-          .catch(() => 0)
-      );
-
-      const statuses = await Promise.all(jobs);
-      const statusCounts = statuses.reduce((acc, status) => {
-        const key = String(status);
-        acc[key] = (acc[key] || 0) + 1;
-        return acc;
-      }, {});
-
-      appendLog('manual:alert-burst', { status_counts: statusCounts, requests: burstSize });
-      alertButton.disabled = false;
-      alertButton.textContent = 'Trigger alert';
-    }
-
-    document.getElementById('btn-summary').addEventListener('click', () => {
-      recommendationRefreshCount += 1;
-      refreshSummary('manual:summary');
-    });
-
     document.getElementById('btn-checkout').addEventListener('click', () => {
       checkoutOrder();
     });
 
-    document.getElementById('btn-chaos').addEventListener('click', () => {
-      fetch('/api/error').catch(() => undefined);
-      appendLog('manual:error-path', { fired: true });
-    });
-
-    document.getElementById('btn-alert').addEventListener('click', () => {
-      triggerAlertBurst();
+    faultButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        triggerFault(button.getAttribute('data-fault'), button);
+      });
     });
 
     logoutButton.addEventListener('click', async () => {
@@ -2097,34 +2037,17 @@ function renderIndex(): string
       }
     });
 
-    let filterTimer;
-    function triggerBrowseTelemetry() {
-      clearTimeout(filterTimer);
-      filterTimer = setTimeout(() => {
-        refreshSummary('browse:summary-refresh');
-      }, 240);
-    }
-
     searchInput.addEventListener('input', () => {
       renderGrid();
-      if (lastSummary) {
-        renderRecommendations(deriveRecommendations(lastSummary, recommendationRefreshCount), recommendationRefreshCount);
-      }
-      triggerBrowseTelemetry();
     });
 
     categoryInput.addEventListener('change', () => {
       renderGrid();
-      if (lastSummary) {
-        renderRecommendations(deriveRecommendations(lastSummary, recommendationRefreshCount), recommendationRefreshCount);
-      }
-      triggerBrowseTelemetry();
     });
 
     renderGrid();
     renderCart();
     refreshAuthState().then(() => refreshOrders());
-    refreshSummary('startup:summary');
   </script>
 </body>
 </html>
@@ -2413,12 +2336,131 @@ function elapsedMs(float $requestStart): float
     return round((microtime(true) - $requestStart) * 1000, 2);
 }
 
-function triggerIntentionalErrorPath(): void
+function triggerFault(string $target, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan): array
 {
-  throw new RuntimeException('Intentional PHP error path triggered');
+  return match ($target) {
+    'mysql' => triggerProbeFault('mysql', fn (array $_span, array $_appSpan) => queryMysql(true), $logger, $emitter, $rootSpan, [
+      'component.layer' => 'infrastructure',
+      'infra.kind' => 'database',
+      'db.system' => 'mysql',
+      'db.name' => 'catalog',
+      'server.address' => getenv('MYSQL_HOST') ?: 'mysql',
+    ], [
+      'app.operation' => 'queryMysql',
+      'code.function.name' => 'queryMysql',
+      'code.file.path' => __FILE__,
+    ]),
+    'postgres' => triggerProbeFault('postgres', fn (array $_span, array $_appSpan) => queryPostgres(true), $logger, $emitter, $rootSpan, [
+      'component.layer' => 'infrastructure',
+      'infra.kind' => 'database',
+      'db.system' => 'postgresql',
+      'db.name' => 'recommendations',
+      'server.address' => getenv('POSTGRES_HOST') ?: 'postgres',
+    ], [
+      'app.operation' => 'queryPostgres',
+      'code.function.name' => 'queryPostgres',
+      'code.file.path' => __FILE__,
+    ]),
+    'redis' => triggerProbeFault('redis', fn (array $_span, array $_appSpan) => queryRedis(true), $logger, $emitter, $rootSpan, [
+      'component.layer' => 'infrastructure',
+      'infra.kind' => 'cache',
+      'db.system' => 'redis',
+      'server.address' => getenv('REDIS_HOST') ?: 'redis',
+    ], [
+      'app.operation' => 'queryRedis',
+      'code.function.name' => 'queryRedis',
+      'code.file.path' => __FILE__,
+    ]),
+    'php' => triggerPhpFault($logger, $emitter, $rootSpan),
+    'python' => triggerDownstreamFault('python', (getenv('PYTHON_SERVICE_URL') ?: 'http://python-recommendation:8000') . '/recommendations?user_id=1&fail=1', $logger, $emitter, $rootSpan, [
+      'component.layer' => 'application',
+      'peer.service' => 'python-recommendation',
+      'http.route' => '/recommendations',
+    ]),
+    'java' => triggerDownstreamFault('java', (getenv('JAVA_SERVICE_URL') ?: 'http://java-checkout:8081') . '/quote?fail=1', $logger, $emitter, $rootSpan, [
+      'component.layer' => 'application',
+      'peer.service' => 'java-checkout',
+      'http.route' => '/quote',
+    ]),
+    'nodejs' => triggerDownstreamFault('nodejs', (getenv('NODE_SERVICE_URL') ?: 'http://node-catalog:3000') . '/inventory?fail=1', $logger, $emitter, $rootSpan, [
+      'component.layer' => 'application',
+      'peer.service' => 'node-catalog',
+      'http.route' => '/inventory',
+    ]),
+    default => ['ok' => false, 'target' => $target, 'error' => 'Onbekende fouttrigger.'],
+  };
 }
 
-function buildSyntheticDatabaseException(string $message, array $context = []): RuntimeException
+function triggerProbeFault(string $name, callable $operation, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan, array $extraAttributes, array $appAttributes = []): array
+{
+  $probe = probeStep($name, $operation, $logger, $emitter, $rootSpan, $extraAttributes, $appAttributes);
+
+  return [
+    'ok' => $probe['ok'],
+    'target' => $name,
+    'error' => (string) ($probe['data']['error'] ?? ''),
+  ];
+}
+
+function triggerPhpFault(AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan): array
+{
+  global $requestId;
+
+  $span = $emitter->startSpan('php.application.manual_fault', [
+    'component.name' => 'php',
+    'component.type' => 'application_logic',
+    'component.layer' => 'application',
+    'request.id' => $requestId,
+    'code.function.name' => 'triggerPhpFault',
+    'code.file.path' => __FILE__,
+  ], $rootSpan, 1);
+
+  try {
+    throw enrichThrowable(new RuntimeException('php storefront failed while preparing checkout context'), [
+      'root_cause.layer' => 'application',
+      'root_cause.component' => 'php-storefront',
+      'root_cause.reason' => 'application_runtime_failure',
+      'root_cause.summary' => 'PHP storefront raised an application exception',
+      'root_cause.confidence' => 'high',
+      'symptom.component' => 'php-storefront',
+      'symptom.layer' => 'application',
+    ]);
+  } catch (Throwable $error) {
+    $errorContext = describeThrowable($error);
+    $emitter->exportTrace($emitter->finishSpan($span, array_merge([
+      'component.ok' => false,
+      'error' => true,
+    ], $errorContext), true, $error->getMessage()));
+    $logger->error('PHP fault triggered', [
+      'error' => $error->getMessage(),
+      'request_id' => $requestId,
+      'error_file' => (string) ($errorContext['error.file'] ?? ''),
+      'error_function' => (string) ($errorContext['error.function'] ?? ''),
+      'error_line' => (int) ($errorContext['error.line'] ?? 0),
+    ]);
+
+    return [
+      'ok' => false,
+      'target' => 'php',
+      'error' => $error->getMessage(),
+    ];
+  }
+}
+
+function triggerDownstreamFault(string $target, string $url, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan, array $extraAttributes = []): array
+{
+  $probe = probeStep($target, fn (array $span, array $_appSpan) => httpJson($url, true, $emitter, $span), $logger, $emitter, $rootSpan, $extraAttributes);
+  $data = $probe['data'] ?? [];
+
+  return [
+    'ok' => false,
+    'target' => $target,
+    'status_code' => (int) ($data['status_code'] ?? 503),
+    'error' => (string) (($data['payload']['error'] ?? $data['status_line'] ?? 'Downstream fout geactiveerd')),
+  ];
+}
+
+function buildDatabaseException(string $message, array $context = []): RuntimeException
 {
   return enrichThrowable(new RuntimeException($message), $context);
 }
