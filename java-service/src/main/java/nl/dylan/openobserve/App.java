@@ -210,13 +210,6 @@ public final class App {
 
   private static void applyErrorAttributes(Span span, Throwable error, String symptomComponent, String symptomLayer) {
     StackTraceElement frame = firstApplicationFrame(error);
-    Map<String, String> classification = classifyError(error);
-
-    span.setAttribute("symptom.component", symptomComponent);
-    span.setAttribute("symptom.layer", symptomLayer);
-    for (Map.Entry<String, String> entry : classification.entrySet()) {
-      span.setAttribute(entry.getKey(), entry.getValue());
-    }
     span.setAttribute("exception.type", error.getClass().getSimpleName());
     span.setAttribute("exception.message", String.valueOf(error.getMessage()));
     span.setAttribute("exception.stacktrace", stackTraceAsString(error));
@@ -235,24 +228,6 @@ public final class App {
     context.put("code_function_name", frame.getClassName() + "." + frame.getMethodName());
     context.put("code_line_number", frame.getLineNumber());
     return context;
-  }
-
-  private static Map<String, String> classifyError(Throwable error) {
-    String message = error.getMessage() == null ? "" : error.getMessage().toLowerCase();
-    if (message.contains("timeout")) {
-      return Map.of(
-          "root_cause.layer", "application",
-          "root_cause.component", SERVICE_NAME,
-          "root_cause.reason", "application_timeout",
-          "root_cause.summary", "Java checkout logic exceeded its expected execution window",
-          "root_cause.confidence", "medium");
-    }
-    return Map.of(
-        "root_cause.layer", "application",
-        "root_cause.component", SERVICE_NAME,
-        "root_cause.reason", "application_runtime_failure",
-        "root_cause.summary", "Java checkout service raised an application exception",
-        "root_cause.confidence", "medium");
   }
 
   private static StackTraceElement firstApplicationFrame(Throwable error) {

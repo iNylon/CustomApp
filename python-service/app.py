@@ -124,41 +124,9 @@ def error_location(error: Exception):
     }
 
 
-def classify_error(error: Exception):
-    message = str(error).lower()
-    if "deadlock" in message:
-        return {
-            "root_cause.layer": "application",
-            "root_cause.component": SERVICE_NAME,
-            "root_cause.reason": "conflicting_transaction_order",
-            "root_cause.summary": "Python recommendation queries likely created conflicting transaction order",
-            "root_cause.confidence": "high",
-        }
-    if "lock" in message:
-        return {
-            "root_cause.layer": "application",
-            "root_cause.component": SERVICE_NAME,
-            "root_cause.reason": "transaction_held_open",
-            "root_cause.summary": "Python recommendation flow likely held a lock too long",
-            "root_cause.confidence": "high",
-        }
-    return {
-        "root_cause.layer": "application",
-        "root_cause.component": SERVICE_NAME,
-        "root_cause.reason": "application_runtime_failure",
-        "root_cause.summary": "Python recommendation service raised an application error",
-        "root_cause.confidence": "medium",
-    }
-
-
-def apply_error_attributes(span, error: Exception, symptom_component: str, symptom_layer: str):
+def apply_error_attributes(span, error: Exception):
     location = error_location(error)
     context = extract_error_context(error)
-    classification = classify_error(error)
-    span.set_attribute("symptom.component", symptom_component)
-    span.set_attribute("symptom.layer", symptom_layer)
-    for key, value in classification.items():
-        span.set_attribute(key, value)
     span.set_attribute("exception.type", error.__class__.__name__)
     span.set_attribute("exception.message", str(error))
     span.set_attribute("exception.stacktrace", "".join(traceback.format_exception(type(error), error, error.__traceback__)))
@@ -298,7 +266,7 @@ def recommendations():
         except Exception as error:
             error_counter.add(1, {"route": request.path})
             span.record_exception(error)
-            apply_error_attributes(span, error, "postgres", "infrastructure")
+            apply_error_attributes(span, error)
             span.set_status(Status(StatusCode.ERROR, str(error)))
             log(
                 "ERROR",

@@ -80,42 +80,9 @@ function attachErrorContext(error, context = {}) {
   return error;
 }
 
-function classifyError(error) {
-  const message = String(error?.message || '').toLowerCase();
-  if (message.includes('lock wait timeout')) {
-    return {
-      'root_cause.layer': 'application',
-      'root_cause.component': serviceName,
-      'root_cause.reason': 'transaction_held_open',
-      'root_cause.summary': 'Node inventory logic likely held a database lock too long',
-      'root_cause.confidence': 'high',
-    };
-  }
-  if (message.includes('deadlock')) {
-    return {
-      'root_cause.layer': 'application',
-      'root_cause.component': serviceName,
-      'root_cause.reason': 'conflicting_transaction_order',
-      'root_cause.summary': 'Node inventory queries likely created conflicting transaction order',
-      'root_cause.confidence': 'high',
-    };
-  }
-  return {
-    'root_cause.layer': 'application',
-    'root_cause.component': serviceName,
-    'root_cause.reason': 'application_runtime_failure',
-    'root_cause.summary': 'Node service raised an application error while processing inventory',
-    'root_cause.confidence': 'medium',
-  };
-}
-
-function applyErrorAttributes(span, error, symptomComponent, symptomLayer) {
+function applyErrorAttributes(span, error) {
   const location = errorLocation(error);
   const context = error?.observabilityContext || {};
-  const classification = classifyError(error);
-  span.setAttribute('symptom.component', symptomComponent);
-  span.setAttribute('symptom.layer', symptomLayer);
-  Object.entries(classification).forEach(([key, value]) => span.setAttribute(key, value));
   span.setAttribute('exception.type', error?.name || 'Error');
   span.setAttribute('exception.message', error?.message || 'Unknown error');
   span.setAttribute('exception.stacktrace', String(error?.stack || ''));
@@ -173,13 +140,7 @@ app.get('/inventory', async (req, res) => {
       await redis.set('node:last_inventory_fetch', new Date().toISOString());
 
       if (req.query.fail === '1') {
-        throw attachErrorContext(new Error('node inventory lookup failed during catalog processing'), {
-          'root_cause.layer': 'application',
-          'root_cause.component': serviceName,
-          'root_cause.reason': 'application_runtime_failure',
-          'root_cause.summary': 'Node catalog service raised an application exception while serving inventory',
-          'root_cause.confidence': 'high',
-        });
+        throw new Error('node inventory lookup failed during catalog processing');
       }
 
       if (Math.random() < 0.1) {
@@ -201,7 +162,7 @@ app.get('/inventory', async (req, res) => {
       errorCounter.add(1, { route: '/inventory' });
       span.recordException(error);
       const location = errorLocation(error);
-      applyErrorAttributes(span, error, 'mysql', 'infrastructure');
+      applyErrorAttributes(span, error);
       span.setStatus({ code: 2, message: error.message });
       log('ERROR', 'node inventory failed', {
         error: error.message,

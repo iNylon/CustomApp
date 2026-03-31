@@ -512,8 +512,6 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
         $emitter->exportTrace($emitter->finishSpan($appSpan, array_merge([
             'component.name' => $name,
             'component.ok' => true,
-            'root_cause.layer' => 'none',
-            'root_cause.reason' => 'no_error',
             'duration_ms' => elapsedMs($start),
         ], $telemetry)));
 
@@ -521,25 +519,19 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
     } catch (Throwable $error) {
         $message = $error->getMessage();
       $errorContext = describeThrowable($error);
-      $classification = classifyProbeFailure($name, $extraAttributes, $errorContext);
 
         $emitter->exportTrace($emitter->finishSpan($span, array_merge([
             'component.name' => $name,
             'component.ok' => false,
             'duration_ms' => elapsedMs($start),
             'error' => true,
-            'symptom.component' => $name,
-            'symptom.layer' => (string) ($extraAttributes['component.layer'] ?? 'unknown'),
-            'symptom.kind' => (string) ($extraAttributes['infra.kind'] ?? $extraAttributes['component.type'] ?? 'dependency'),
-            'root_cause.layer' => 'symptom',
-            'root_cause.reason' => 'dependency_error_surface',
       ], $extraAttributes, $errorContext), true, $message));
         $emitter->exportTrace($emitter->finishSpan($appSpan, array_merge([
             'component.name' => $name,
             'component.ok' => false,
             'duration_ms' => elapsedMs($start),
             'error' => true,
-        ], $classification, $errorContext), true, (string) ($classification['root_cause.summary'] ?? $message)));
+        ], $errorContext), true, $message));
 
         $emitter->exportMetrics([
             $emitter->counter('php_component_errors_total', 1, ['component' => $name]),
@@ -555,8 +547,6 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
           'error_function' => (string) ($errorContext['error.function'] ?? ''),
           'error_file' => (string) ($errorContext['error.file'] ?? ''),
           'error_line' => (int) ($errorContext['error.line'] ?? 0),
-          'root_cause_layer' => (string) ($classification['root_cause.layer'] ?? 'unknown'),
-          'root_cause_reason' => (string) ($classification['root_cause.reason'] ?? 'unknown'),
         ]);
 
         return [
@@ -581,69 +571,6 @@ function stripProbeTelemetry(array $data): array
   return $data;
 }
 
-function classifyProbeFailure(string $name, array $extraAttributes, array $errorContext): array
-{
-  $message = strtolower((string) ($errorContext['error.message'] ?? ''));
-  $function = strtolower((string) ($errorContext['error.function'] ?? ''));
-  $dbSystem = strtolower((string) ($extraAttributes['db.system'] ?? ''));
-  $componentLayer = strtolower((string) ($extraAttributes['component.layer'] ?? ''));
-  $symptomLayer = (string) ($extraAttributes['component.layer'] ?? 'unknown');
-  $symptomKind = (string) ($extraAttributes['infra.kind'] ?? $extraAttributes['component.type'] ?? 'dependency');
-
-  $rootCauseLayer = 'unknown';
-  $rootCauseReason = 'unclassified_failure';
-  $rootCauseSummary = 'Probe failed without a root-cause classification';
-  $confidence = 'medium';
-
-  if ($dbSystem !== '' && str_contains($message, 'lock wait timeout')) {
-    $rootCauseLayer = 'application';
-    $rootCauseReason = 'transaction_held_open';
-    $rootCauseSummary = 'Application transaction likely held a MySQL lock too long before the dependency timed out';
-    $confidence = 'high';
-  } elseif ($dbSystem !== '' && str_contains($message, 'deadlock')) {
-    $rootCauseLayer = 'application';
-    $rootCauseReason = 'conflicting_transaction_order';
-    $rootCauseSummary = 'Application queries likely created a conflicting transaction order that resulted in a deadlock';
-    $confidence = 'high';
-  } elseif ($dbSystem === 'redis' && str_contains($message, 'transaction conflicts exceeded threshold')) {
-    $rootCauseLayer = 'application';
-    $rootCauseReason = 'high_contention_retry_pattern';
-    $rootCauseSummary = 'Application retry pattern likely created hot-key contention in Redis';
-    $confidence = 'high';
-  } elseif ($dbSystem !== '' && (
-      str_contains($message, 'connection refused') ||
-      str_contains($message, 'server has gone away') ||
-      str_contains($message, 'could not connect') ||
-      str_contains($message, 'name or service not known')
-    )) {
-    $rootCauseLayer = 'infrastructure';
-    $rootCauseReason = 'dependency_connectivity';
-    $rootCauseSummary = 'Dependency was unreachable or unavailable from the application';
-    $confidence = 'high';
-  } elseif ($componentLayer === 'application') {
-    $rootCauseLayer = 'application';
-    $rootCauseReason = 'downstream_application_failure';
-    $rootCauseSummary = 'Downstream application returned an error to the storefront';
-  } elseif ($dbSystem !== '' || $componentLayer === 'infrastructure') {
-    $rootCauseLayer = 'infrastructure';
-    $rootCauseReason = 'dependency_runtime_failure';
-    $rootCauseSummary = 'Dependency failed while serving the application request';
-  }
-
-  return [
-    'symptom.component' => $name,
-    'symptom.layer' => $symptomLayer,
-    'symptom.kind' => $symptomKind,
-    'root_cause.layer' => $rootCauseLayer,
-    'root_cause.component' => $rootCauseLayer === 'application' ? 'php-storefront' : $name,
-    'root_cause.reason' => $rootCauseReason,
-    'root_cause.summary' => $rootCauseSummary,
-    'root_cause.confidence' => $confidence,
-    'root_cause.detected_by' => 'php-storefront-heuristics',
-    'app.code.function' => $function,
-  ];
-}
-
 function queryMysql(bool $forceFailure = false): array
 {
     $queryStart = microtime(true);
@@ -664,13 +591,6 @@ function queryMysql(bool $forceFailure = false): array
     $lockTarget = 'products.id=1';
     $operationSequence = [];
     $lastQueryType = 'read';
-    $queryShape = 'point_lookup_with_lock';
-    $queryRisk = 'normal';
-    $baselineMs = 24.0;
-    $p95Ms = 80.0;
-    $p99Ms = 120.0;
-    $fullTableScan = false;
-    $poorlyOptimized = false;
 
     if (isDbBottleneckModeEnabled()) {
         try {
@@ -701,10 +621,6 @@ function queryMysql(bool $forceFailure = false): array
                 $wasteQueries++;
                 $lastQueryType = 'select_count';
                 $operationSequence[] = 'count_by_category:' . $category;
-                $queryShape = 'repeated_count_by_category';
-                $queryRisk = 'aggregation_repeated_under_lock';
-                $fullTableScan = true;
-                $poorlyOptimized = true;
             }
 
             if ($forceFailure || random_int(1, 100) <= 14) {
@@ -719,14 +635,7 @@ function queryMysql(bool $forceFailure = false): array
                         'db.operation_sequence' => implode(' > ', $operationSequence),
                         'db.transaction.stage' => 'lock_contention',
                     ], databasePerformanceAttributes(
-                        $durationMs,
-                        $baselineMs,
-                        $p95Ms,
-                        $p99Ms,
-                        $fullTableScan,
-                        $poorlyOptimized,
-                        $queryShape,
-                        $queryRisk
+                        $durationMs
                     ))
                 );
             }
@@ -751,14 +660,7 @@ function queryMysql(bool $forceFailure = false): array
                 'db.lock_target' => $lockTarget,
                 'db.operation_sequence' => implode(' > ', $operationSequence),
                 ...databasePerformanceAttributes(
-                    round((microtime(true) - $queryStart) * 1000, 2),
-                    $baselineMs,
-                    $p95Ms,
-                    $p99Ms,
-                    $fullTableScan,
-                    $poorlyOptimized,
-                    $queryShape,
-                    $queryRisk
+                    round((microtime(true) - $queryStart) * 1000, 2)
                 ),
             ]);
         }
@@ -774,14 +676,7 @@ function queryMysql(bool $forceFailure = false): array
         'inventory_total' => (int) ($row['inventory_total'] ?? 0),
         'waste_queries' => $wasteQueries,
         '_telemetry' => databasePerformanceAttributes(
-            $durationMs,
-            $baselineMs,
-            $p95Ms,
-            $p99Ms,
-            $fullTableScan,
-            $poorlyOptimized,
-            $queryShape,
-            $queryRisk
+            $durationMs
         ),
     ];
 }
@@ -801,13 +696,6 @@ function queryPostgres(bool $forceFailure = false): array
     $lockTarget = 'users.id=1';
     $operationSequence = [];
     $lastQueryType = 'read';
-    $queryShape = 'user_recommendation_lookup';
-    $queryRisk = 'normal';
-    $baselineMs = 28.0;
-    $p95Ms = 90.0;
-    $p99Ms = 130.0;
-    $fullTableScan = false;
-    $poorlyOptimized = false;
 
     if (isDbBottleneckModeEnabled()) {
         try {
@@ -837,10 +725,6 @@ function queryPostgres(bool $forceFailure = false): array
                 $wasteQueries++;
                 $lastQueryType = 'select_count';
                 $operationSequence[] = 'count_recommendations:' . $userId;
-                $queryShape = 'repeated_recommendation_count';
-                $queryRisk = 'repeated_count_under_lock';
-                $fullTableScan = true;
-                $poorlyOptimized = true;
             }
 
             if ($forceFailure || random_int(1, 100) <= 14) {
@@ -855,14 +739,7 @@ function queryPostgres(bool $forceFailure = false): array
                         'db.operation_sequence' => implode(' > ', $operationSequence),
                         'db.transaction.stage' => 'deadlock',
                     ], databasePerformanceAttributes(
-                        $durationMs,
-                        $baselineMs,
-                        $p95Ms,
-                        $p99Ms,
-                        $fullTableScan,
-                        $poorlyOptimized,
-                        $queryShape,
-                        $queryRisk
+                        $durationMs
                     ))
                 );
             }
@@ -887,14 +764,7 @@ function queryPostgres(bool $forceFailure = false): array
                 'db.lock_target' => $lockTarget,
                 'db.operation_sequence' => implode(' > ', $operationSequence),
                 ...databasePerformanceAttributes(
-                    round((microtime(true) - $queryStart) * 1000, 2),
-                    $baselineMs,
-                    $p95Ms,
-                    $p99Ms,
-                    $fullTableScan,
-                    $poorlyOptimized,
-                    $queryShape,
-                    $queryRisk
+                    round((microtime(true) - $queryStart) * 1000, 2)
                 ),
             ]);
         }
@@ -909,14 +779,7 @@ function queryPostgres(bool $forceFailure = false): array
         'recommendation_count' => (int) ($row['recommendation_count'] ?? 0),
         'waste_queries' => $wasteQueries,
         '_telemetry' => databasePerformanceAttributes(
-            $durationMs,
-            $baselineMs,
-            $p95Ms,
-            $p99Ms,
-            $fullTableScan,
-            $poorlyOptimized,
-            $queryShape,
-            $queryRisk
+            $durationMs
         ),
     ];
 }
@@ -930,9 +793,6 @@ function queryRedis(bool $forceFailure = false): array
     $loops = max(1, min((int) (getenv('APP_REDIS_BOTTLENECK_LOOPS') ?: 20), 200));
     $wasteOps = 0;
     $retryConflicts = 0;
-    $baselineMs = 8.0;
-    $p95Ms = 30.0;
-    $p99Ms = 55.0;
 
     $redis->set('php:last_seen', gmdate('c'));
     $hotKey = 'redis:hotspot:counter';
@@ -967,14 +827,7 @@ function queryRedis(bool $forceFailure = false): array
             'db.lock_target' => $hotKey,
             'db.operation_sequence' => 'watch > multi > set > expire > exec',
             ...databasePerformanceAttributes(
-                round((microtime(true) - $queryStart) * 1000, 2),
-                $baselineMs,
-                $p95Ms,
-                $p99Ms,
-                false,
-                $retryConflicts > 0,
-                'hot_key_counter_update',
-                'cache_contention'
+                round((microtime(true) - $queryStart) * 1000, 2)
             ),
         ]);
     }
@@ -986,41 +839,16 @@ function queryRedis(bool $forceFailure = false): array
         'redis_waste_ops' => $wasteOps,
         'redis_tx_conflicts' => $retryConflicts,
         '_telemetry' => databasePerformanceAttributes(
-            $durationMs,
-            $baselineMs,
-            $p95Ms,
-            $p99Ms,
-            false,
-            $retryConflicts > 0,
-            'hot_key_counter_update',
-            'cache_contention'
+            $durationMs
         ),
     ];
 }
 
-function databasePerformanceAttributes(
-    float $durationMs,
-    float $baselineMs,
-    float $p95Ms,
-    float $p99Ms,
-    bool $fullTableScan,
-    bool $poorlyOptimized,
-    string $queryShape,
-    string $queryRisk
-): array {
+function databasePerformanceAttributes(float $durationMs): array
+{
     return [
         'db.query.duration' => $durationMs,
         'db.response_time_ms' => $durationMs,
-        'db.response_time.baseline_ms' => $baselineMs,
-        'db.response_time.delta_ms' => round($durationMs - $baselineMs, 2),
-        'db.response_time.p95_ms' => $p95Ms,
-        'db.response_time.p99_ms' => $p99Ms,
-        'db.slow_query' => $durationMs >= $p95Ms,
-        'db.response_time.elevated' => $durationMs > $baselineMs,
-        'db.full_table_scan' => $fullTableScan,
-        'db.poorly_optimized_query' => $poorlyOptimized,
-        'db.query.shape' => $queryShape,
-        'db.query.risk' => $queryRisk,
     ];
 }
 
@@ -2566,15 +2394,7 @@ function triggerPhpFault(AppLogger $logger, OtlpHttpEmitter $emitter, array $roo
   ], $rootSpan, 1);
 
   try {
-    throw enrichThrowable(new RuntimeException('php storefront failed while preparing checkout context'), [
-      'root_cause.layer' => 'application',
-      'root_cause.component' => 'php-storefront',
-      'root_cause.reason' => 'application_runtime_failure',
-      'root_cause.summary' => 'PHP storefront raised an application exception',
-      'root_cause.confidence' => 'high',
-      'symptom.component' => 'php-storefront',
-      'symptom.layer' => 'application',
-    ]);
+    throw new RuntimeException('php storefront failed while preparing checkout context');
   } catch (Throwable $error) {
     $errorContext = describeThrowable($error);
     $emitter->exportTrace($emitter->finishSpan($span, array_merge([
