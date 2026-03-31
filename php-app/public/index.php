@@ -1184,8 +1184,11 @@ function renderIndex(): string
     }
     .layout {
       display: grid;
-      grid-template-columns: 1.45fr 0.9fr;
+      grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.9fr);
       gap: 14px;
+    }
+    .layout > * {
+      min-width: 0;
     }
     .panel {
       border: 1px solid var(--line);
@@ -1199,12 +1202,20 @@ function renderIndex(): string
       gap: 12px;
     }
     .toolbar {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 210px;
+      display: flex;
+      align-items: center;
       gap: 8px;
     }
     .toolbar > * {
       min-width: 0;
+    }
+    #search {
+      flex: 1 1 auto;
+      max-width: 100%;
+    }
+    #category {
+      flex: 0 0 210px;
+      max-width: 210px;
     }
     input, select {
       width: 100%;
@@ -1372,6 +1383,10 @@ function renderIndex(): string
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
       .hero-top { align-items: flex-start; }
+      #category {
+        flex-basis: 160px;
+        max-width: 160px;
+      }
     }
   </style>
 </head>
