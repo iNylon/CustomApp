@@ -34,6 +34,9 @@ KEEPALIVE_INTERVAL_SECONDS = max(10, int(os.getenv("APP_METRIC_KEEPALIVE_INTERVA
 KEEPALIVE_START_DELAY_SECONDS = max(1, int(os.getenv("APP_METRIC_KEEPALIVE_START_DELAY_SECONDS", "12")))
 KEEPALIVE_ROUNDS_PER_CYCLE = max(1, int(os.getenv("APP_METRIC_KEEPALIVE_ROUNDS_PER_CYCLE", "2")))
 KEEPALIVE_BETWEEN_REQUESTS_MS = max(0, int(os.getenv("APP_METRIC_KEEPALIVE_BETWEEN_REQUESTS_MS", "200")))
+RESOURCE_SAMPLE_INTERVAL_SECONDS = max(5, int(os.getenv("APP_RESOURCE_SAMPLE_INTERVAL_SECONDS", "10")))
+RESOURCE_WARN_CPU_PERCENT = max(1, int(os.getenv("APP_RESOURCE_WARN_CPU_PERCENT", "35")))
+RESOURCE_WARN_MEMORY_MB = max(32, int(os.getenv("APP_RESOURCE_WARN_MEMORY_MB", "180")))
 PHP_STOREFRONT_URL = os.getenv("PHP_STOREFRONT_URL", "http://php-storefront:8080").rstrip("/")
 PYTHON_PUBLIC_URL = os.getenv("PYTHON_PUBLIC_URL", "http://python-recommendation:8000").rstrip("/")
 NODE_SERVICE_URL = os.getenv("NODE_SERVICE_URL", "http://node-catalog:3000").rstrip("/")
@@ -64,6 +67,13 @@ meter = metrics.get_meter(SERVICE_NAME)
 request_counter = meter.create_counter("python_requests_total")
 error_counter = meter.create_counter("python_errors_total")
 latency_histogram = meter.create_histogram("python_request_duration_ms", unit="ms")
+resource_cpu_histogram = meter.create_histogram("python_process_cpu_percent", unit="percent")
+resource_memory_histogram = meter.create_histogram("python_process_memory_rss_mb", unit="MB")
+resource_virtual_memory_histogram = meter.create_histogram("python_process_memory_virtual_mb", unit="MB")
+
+_resource_lock = threading.Lock()
+_last_resource_wall = time.perf_counter()
+_last_resource_cpu = time.process_time()
 
 app = Flask(__name__)
 
@@ -154,6 +164,77 @@ def apply_error_attributes(span, error: Exception):
 def pause_between_keepalive_calls():
     if KEEPALIVE_BETWEEN_REQUESTS_MS > 0:
         time.sleep(KEEPALIVE_BETWEEN_REQUESTS_MS / 1000)
+
+
+def read_proc_memory_stats():
+    stats = {"rss_mb": 0.0, "virtual_mb": 0.0}
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    stats["rss_mb"] = round(int(line.split()[1]) / 1024, 2)
+                elif line.startswith("VmSize:"):
+                    stats["virtual_mb"] = round(int(line.split()[1]) / 1024, 2)
+    except FileNotFoundError:
+        pass
+    return stats
+
+
+def sample_process_resources():
+    global _last_resource_wall, _last_resource_cpu
+
+    with _resource_lock:
+        now_wall = time.perf_counter()
+        now_cpu = time.process_time()
+        wall_delta = max(now_wall - _last_resource_wall, 1e-9)
+        cpu_delta = max(now_cpu - _last_resource_cpu, 0.0)
+        _last_resource_wall = now_wall
+        _last_resource_cpu = now_cpu
+
+    memory_stats = read_proc_memory_stats()
+    return {
+        "pid": os.getpid(),
+        "cpu_percent": round((cpu_delta / wall_delta) * 100, 2),
+        "memory_rss_mb": memory_stats["rss_mb"],
+        "memory_virtual_mb": memory_stats["virtual_mb"],
+    }
+
+
+def record_process_resource_metrics(scope: str, route: str = "", status: Optional[int] = None, component: str = "runtime", emit_log: bool = False):
+    snapshot = sample_process_resources()
+    attrs = {
+        "scope": scope,
+        "component": component,
+        "pid": snapshot["pid"],
+    }
+    if route:
+        attrs["route"] = route
+    if status is not None:
+        attrs["status"] = status
+
+    resource_cpu_histogram.record(snapshot["cpu_percent"], attrs)
+    resource_memory_histogram.record(snapshot["memory_rss_mb"], attrs)
+    resource_virtual_memory_histogram.record(snapshot["memory_virtual_mb"], attrs)
+
+    threshold_exceeded = snapshot["cpu_percent"] >= RESOURCE_WARN_CPU_PERCENT or snapshot["memory_rss_mb"] >= RESOURCE_WARN_MEMORY_MB
+    if emit_log or threshold_exceeded:
+        severity = "WARN" if threshold_exceeded else "INFO"
+        log(
+            severity,
+            "python resource snapshot" if not threshold_exceeded else "python resource threshold exceeded",
+            scope=scope,
+            component=component,
+            pid=snapshot["pid"],
+            route=route,
+            status=status if status is not None else 0,
+            cpu_percent=snapshot["cpu_percent"],
+            memory_rss_mb=snapshot["memory_rss_mb"],
+            memory_virtual_mb=snapshot["memory_virtual_mb"],
+            cpu_warn_percent=RESOURCE_WARN_CPU_PERCENT,
+            memory_warn_mb=RESOURCE_WARN_MEMORY_MB,
+        )
+
+    return snapshot
 
 
 def http_request(method: str, url: str, session: Optional[requests.Session] = None, expected_statuses: tuple[int, ...] = (200,), **kwargs):
@@ -454,6 +535,18 @@ def start_keepalive_loop():
     return worker
 
 
+def start_resource_sampler_loop():
+    def loop():
+        time.sleep(RESOURCE_SAMPLE_INTERVAL_SECONDS)
+        while True:
+            record_process_resource_metrics("background", component="resource_sampler", emit_log=True)
+            time.sleep(RESOURCE_SAMPLE_INTERVAL_SECONDS)
+
+    worker = threading.Thread(target=loop, name="resource-sampler", daemon=True)
+    worker.start()
+    return worker
+
+
 @app.before_request
 def before_request():
     request._start_time = time.perf_counter()
@@ -468,6 +561,7 @@ def after_request(response):
     attrs = {"route": request.path, "status": response.status_code}
     request_counter.add(1, attrs)
     latency_histogram.record(duration, attrs)
+    record_process_resource_metrics("request", route=request.path, status=response.status_code)
     response.headers["x-request-id"] = request._request_id
     log("INFO", "python request complete", path=request.path, status=response.status_code, duration_ms=round(duration, 2), request_id=request._request_id)
     token = getattr(request, "_otel_token", None)
@@ -604,6 +698,9 @@ if __name__ == "__main__":
         endpoint=OTLP_ENDPOINT,
         failure_rate_percent=SERVICE_FAILURE_RATE_PERCENT,
         db_bottleneck_loops=DB_BOTTLENECK_LOOPS,
+        resource_sample_interval_seconds=RESOURCE_SAMPLE_INTERVAL_SECONDS,
+        resource_warn_cpu_percent=RESOURCE_WARN_CPU_PERCENT,
+        resource_warn_memory_mb=RESOURCE_WARN_MEMORY_MB,
     )
     if KEEPALIVE_ENABLED:
         start_keepalive_loop()
@@ -615,4 +712,5 @@ if __name__ == "__main__":
             round_count=KEEPALIVE_ROUNDS_PER_CYCLE,
             php_storefront_url=PHP_STOREFRONT_URL,
         )
+    start_resource_sampler_loop()
     app.run(host="0.0.0.0", port=int(os.getenv("APP_PORT", "8000")), threaded=True)

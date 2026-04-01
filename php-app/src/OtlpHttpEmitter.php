@@ -104,20 +104,34 @@ final class OtlpHttpEmitter
         ];
     }
 
-    public function histogram(string $name, int|float $value, array $attributes = []): array
+    public function histogram(string $name, int|float $value, array $attributes = [], string $unit = 'ms', array $bounds = [50.0, 100.0, 250.0]): array
     {
         $value = (float) $value;
+        $bounds = array_values(array_map(static fn (int|float $bound): float => (float) $bound, $bounds));
+        sort($bounds);
+
+        $bucketCounts = array_fill(0, count($bounds) + 1, '0');
+        $bucketIndex = count($bounds);
+        foreach ($bounds as $index => $bound) {
+            if ($value <= $bound) {
+                $bucketIndex = $index;
+                break;
+            }
+        }
+        $bucketCounts[$bucketIndex] = '1';
 
         return [
             'name' => $name,
-            'unit' => 'ms',
+            'unit' => $unit,
             'histogram' => [
                 'aggregationTemporality' => 2,
                 'dataPoints' => [[
                     'count' => '1',
                     'sum' => $value,
-                    'bucketCounts' => ['0', '0', '0', '1'],
-                    'explicitBounds' => [50.0, 100.0, 250.0],
+                    'min' => $value,
+                    'max' => $value,
+                    'bucketCounts' => $bucketCounts,
+                    'explicitBounds' => $bounds,
                     'timeUnixNano' => $this->nowNano(),
                     'attributes' => $this->attributes($attributes),
                 ]],

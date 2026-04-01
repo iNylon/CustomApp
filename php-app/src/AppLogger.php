@@ -36,6 +36,11 @@ final class AppLogger
         $this->write('ERROR', $message, $context);
     }
 
+    public function warn(string $message, array $context = []): void
+    {
+        $this->write('WARN', $message, $context);
+    }
+
     public function write(string $severity, string $message, array $context = []): void
     {
         $traceId = (string) ($context['trace_id'] ?? $this->traceContext['trace_id'] ?? '');

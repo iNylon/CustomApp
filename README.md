@@ -47,6 +47,7 @@ Beschikbare endpoints:
 - Python draait ook een keepalive-flow die de storefront periodiek door auth, summary, checkout en fault-paden laat lopen zodat dashboards continu metrics blijven ontvangen.
 - Java simuleert checkout- en payment-achtige flows met Redis en foutinjectie.
 - De PHP-app bevat ook een synthetisch `/api/error` endpoint voor consistente 500-metrics en exception-logs.
+- Alle runtimes sturen nu ook CPU- en geheugengebruik uit, inclusief process/service-context en threshold-logs voor resource-afwijkingen.
 - Alle services schrijven structured logs naar `/var/telemetry-logs/*.log`, die door de collector worden ingelezen.
 - Een Grafana-dashboard voor deze opzet staat in [`grafana/customapp-observability-deep-dive.json`](/Users/dylan/CustomApp/grafana/customapp-observability-deep-dive.json).
 

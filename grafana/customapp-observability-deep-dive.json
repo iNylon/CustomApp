@@ -646,6 +646,103 @@
         }
       ],
       "options": { "showHeader": true }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Resources · Average CPU % by Service",
+      "gridPos": { "x": 0, "y": 92, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(java_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(java_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "Java" },
+        { "refId": "B", "expr": "sum(rate(node_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(node_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "Node" },
+        { "refId": "C", "expr": "sum(rate(php_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(php_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "PHP" },
+        { "refId": "D", "expr": "sum(rate(python_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "Python" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Resources · Memory RSS / Used by Service",
+      "gridPos": { "x": 12, "y": 92, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(java_process_memory_used_mb_sum[$__rate_interval])) / clamp_min(sum(rate(java_process_memory_used_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "Java used" },
+        { "refId": "B", "expr": "sum(rate(node_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(node_process_memory_rss_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "Node RSS" },
+        { "refId": "C", "expr": "sum(rate(php_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(php_process_memory_rss_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "PHP RSS" },
+        { "refId": "D", "expr": "sum(rate(python_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_memory_rss_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "Python RSS" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Resources · CPU % by Scope",
+      "gridPos": { "x": 0, "y": 100, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (scope) (rate(java_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum by (scope) (rate(java_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "Java {{scope}}" },
+        { "refId": "B", "expr": "sum by (scope) (rate(node_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum by (scope) (rate(node_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "Node {{scope}}" },
+        { "refId": "C", "expr": "sum by (scope) (rate(php_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum by (scope) (rate(php_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "PHP {{scope}}" },
+        { "refId": "D", "expr": "sum by (scope) (rate(python_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum by (scope) (rate(python_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "Python {{scope}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Resources · Memory Detail by Service",
+      "gridPos": { "x": 12, "y": 100, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(java_process_memory_committed_mb_sum[$__rate_interval])) / clamp_min(sum(rate(java_process_memory_committed_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "Java committed" },
+        { "refId": "B", "expr": "sum(rate(node_process_heap_used_mb_sum[$__rate_interval])) / clamp_min(sum(rate(node_process_heap_used_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "Node heap used" },
+        { "refId": "C", "expr": "sum(rate(php_process_memory_peak_mb_sum[$__rate_interval])) / clamp_min(sum(rate(php_process_memory_peak_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "PHP peak" },
+        { "refId": "D", "expr": "sum(rate(python_process_memory_virtual_mb_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_memory_virtual_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "Python virtual" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 114,
+      "type": "timeseries",
+      "title": "Logs · Resource Warnings Over Time",
+      "gridPos": { "x": 0, "y": 108, "w": 12, "h": 8 },
+      "datasource": { "type": "openobserve", "uid": "${DS_OPENOBSERVE}" },
+      "targets": [
+        {
+          "refId": "A",
+          "stream": "poc_logs",
+          "organization": "3BTUvLGWaJI6cc5tC2JGlZTW1ea",
+          "sqlMode": true,
+          "displayMode": "auto",
+          "query": "SELECT histogram(_timestamp,'30 second') AS time, service_name AS service, count(*) AS value FROM poc_logs WHERE message LIKE '%resource threshold exceeded%' GROUP BY time, service ORDER BY time"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "id": 115,
+      "type": "table",
+      "title": "Logs · Latest Resource Snapshots",
+      "gridPos": { "x": 12, "y": 108, "w": 12, "h": 8 },
+      "datasource": { "type": "openobserve", "uid": "${DS_OPENOBSERVE}" },
+      "targets": [
+        {
+          "refId": "A",
+          "stream": "poc_logs",
+          "organization": "3BTUvLGWaJI6cc5tC2JGlZTW1ea",
+          "sqlMode": true,
+          "displayMode": "auto",
+          "query": "SELECT _timestamp, service_name, message, context_scope, context_route, context_status, context_pid, context_cpu_percent, context_memory_rss_mb, context_memory_usage_mb, context_memory_used_mb, context_heap_used_mb FROM poc_logs WHERE context_cpu_percent IS NOT NULL OR context_memory_rss_mb IS NOT NULL OR context_memory_used_mb IS NOT NULL ORDER BY _timestamp DESC LIMIT 100"
+        }
+      ],
+      "options": { "showHeader": true }
     }
   ],
   "refresh": "15s",

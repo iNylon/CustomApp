@@ -40,6 +40,7 @@ try {
     route($path, $method, $logger, $emitter, $requestStart, $rootSpan);
 } catch (Throwable $e) {
   $errorContext = describeThrowable($e);
+  $resourceSnapshot = emitPhpProcessResourceTelemetry($path, 500, $logger, $emitter);
 
     http_response_code(500);
     header('Content-Type: application/json');
@@ -47,6 +48,10 @@ try {
     $logger->error('Unhandled PHP exception', [
         'exception' => $e->getMessage(),
         'path' => $path,
+    'cpu_percent' => $resourceSnapshot['cpu_percent'],
+    'memory_usage_mb' => $resourceSnapshot['memory_usage_mb'],
+    'memory_peak_mb' => $resourceSnapshot['memory_peak_mb'],
+    'memory_rss_mb' => $resourceSnapshot['memory_rss_mb'],
     'exception_type' => (string) ($errorContext['error.type'] ?? ''),
     'exception_function' => (string) ($errorContext['error.function'] ?? ''),
     'exception_file' => (string) ($errorContext['error.file'] ?? ''),
@@ -2472,11 +2477,16 @@ function finalize(string $path, int $status, float $requestStart, AppLogger $log
 {
   global $requestId;
 
+    $resourceSnapshot = emitPhpProcessResourceTelemetry($path, $status, $logger, $emitter);
     $latency = elapsedMs($requestStart);
     $logger->info($message, [
         'path' => $path,
         'status' => $status,
         'duration_ms' => $latency,
+    'cpu_percent' => $resourceSnapshot['cpu_percent'],
+    'memory_usage_mb' => $resourceSnapshot['memory_usage_mb'],
+    'memory_peak_mb' => $resourceSnapshot['memory_peak_mb'],
+    'memory_rss_mb' => $resourceSnapshot['memory_rss_mb'],
     'request_id' => $requestId,
     ]);
 
@@ -2504,6 +2514,95 @@ function finalize(string $path, int $status, float $requestStart, AppLogger $log
 function elapsedMs(float $requestStart): float
 {
     return round((microtime(true) - $requestStart) * 1000, 2);
+}
+
+function emitPhpProcessResourceTelemetry(string $path, int $status, AppLogger $logger, OtlpHttpEmitter $emitter): array
+{
+    $snapshot = samplePhpProcessResources();
+    $pid = getmypid();
+    $attrs = [
+        'scope' => 'request',
+        'component' => 'runtime',
+        'pid' => $pid === false ? 0 : $pid,
+        'route' => $path,
+        'status' => $status,
+    ];
+
+    $emitter->exportMetrics([
+        $emitter->histogram('php_process_cpu_percent', $snapshot['cpu_percent'], $attrs, 'percent', [5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 150.0]),
+        $emitter->histogram('php_process_memory_usage_mb', $snapshot['memory_usage_mb'], $attrs, 'MB', [16.0, 32.0, 64.0, 128.0, 256.0, 512.0]),
+        $emitter->histogram('php_process_memory_peak_mb', $snapshot['memory_peak_mb'], $attrs, 'MB', [16.0, 32.0, 64.0, 128.0, 256.0, 512.0]),
+        $emitter->histogram('php_process_memory_rss_mb', $snapshot['memory_rss_mb'], $attrs, 'MB', [16.0, 32.0, 64.0, 128.0, 256.0, 512.0]),
+    ]);
+
+    $warnCpuPercent = (float) (getenv('APP_RESOURCE_WARN_CPU_PERCENT') ?: 35.0);
+    $warnMemoryMb = (float) (getenv('APP_RESOURCE_WARN_MEMORY_MB') ?: 180.0);
+    $thresholdExceeded = $snapshot['cpu_percent'] >= $warnCpuPercent || $snapshot['memory_rss_mb'] >= $warnMemoryMb || $snapshot['memory_usage_mb'] >= $warnMemoryMb;
+
+    if ($thresholdExceeded) {
+        $logger->warn('php resource threshold exceeded', [
+            'path' => $path,
+            'status' => $status,
+            'pid' => $pid === false ? 0 : $pid,
+            'cpu_percent' => $snapshot['cpu_percent'],
+            'memory_usage_mb' => $snapshot['memory_usage_mb'],
+            'memory_peak_mb' => $snapshot['memory_peak_mb'],
+            'memory_rss_mb' => $snapshot['memory_rss_mb'],
+            'cpu_warn_percent' => $warnCpuPercent,
+            'memory_warn_mb' => $warnMemoryMb,
+        ]);
+    }
+
+    return $snapshot;
+}
+
+function samplePhpProcessResources(): array
+{
+    static $lastCpuSeconds = null;
+    static $lastWallTime = null;
+
+    $usage = getrusage();
+    $cpuSeconds = cpuUsageSeconds($usage);
+    $wallTime = microtime(true);
+    $cpuPercent = 0.0;
+
+    if ($lastCpuSeconds !== null && $lastWallTime !== null) {
+        $wallDelta = max($wallTime - $lastWallTime, 1e-9);
+        $cpuDelta = max($cpuSeconds - $lastCpuSeconds, 0.0);
+        $cpuPercent = round(($cpuDelta / $wallDelta) * 100, 2);
+    }
+
+    $lastCpuSeconds = $cpuSeconds;
+    $lastWallTime = $wallTime;
+
+    return [
+        'cpu_percent' => $cpuPercent,
+        'memory_usage_mb' => round(memory_get_usage(true) / 1048576, 2),
+        'memory_peak_mb' => round(memory_get_peak_usage(true) / 1048576, 2),
+        'memory_rss_mb' => readProcStatusMb('VmRSS'),
+    ];
+}
+
+function cpuUsageSeconds(array $usage): float
+{
+    $userSeconds = (float) (($usage['ru_utime.tv_sec'] ?? 0) + (($usage['ru_utime.tv_usec'] ?? 0) / 1000000));
+    $systemSeconds = (float) (($usage['ru_stime.tv_sec'] ?? 0) + (($usage['ru_stime.tv_usec'] ?? 0) / 1000000));
+
+    return $userSeconds + $systemSeconds;
+}
+
+function readProcStatusMb(string $metric): float
+{
+    $status = @file_get_contents('/proc/self/status');
+    if ($status === false) {
+        return 0.0;
+    }
+
+    if (preg_match('/^' . preg_quote($metric, '/') . ':\s+(\d+)\s+kB$/m', $status, $matches) !== 1) {
+        return 0.0;
+    }
+
+    return round(((float) $matches[1]) / 1024, 2);
 }
 
 function triggerFault(string $target, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan): array

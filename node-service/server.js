@@ -17,6 +17,9 @@ const dbBottleneckMode = (process.env.APP_DB_BOTTLENECK_MODE || 'true').toLowerC
 const dbBottleneckLoops = Math.max(1, Number(process.env.APP_DB_BOTTLENECK_LOOPS || '12'));
 const failureRatePercent = Math.max(0, Math.min(100, Number(process.env.APP_SYNTHETIC_FAILURE_RATE_PERCENT || '26')));
 const slowLogThresholdMs = Math.max(50, Number(process.env.APP_SLOW_LOG_THRESHOLD_MS || '110'));
+const resourceSampleIntervalMs = Math.max(5000, Number(process.env.APP_RESOURCE_SAMPLE_INTERVAL_MS || '10000'));
+const resourceWarnCpuPercent = Math.max(1, Number(process.env.APP_RESOURCE_WARN_CPU_PERCENT || '35'));
+const resourceWarnMemoryMb = Math.max(32, Number(process.env.APP_RESOURCE_WARN_MEMORY_MB || '180'));
 
 const sdk = new NodeSDK({
   resource: new Resource({
@@ -39,6 +42,12 @@ const meter = metrics.getMeter(serviceName);
 const requestCounter = meter.createCounter('node_requests_total');
 const errorCounter = meter.createCounter('node_errors_total');
 const latencyHistogram = meter.createHistogram('node_request_duration_ms', { unit: 'ms' });
+const resourceCpuHistogram = meter.createHistogram('node_process_cpu_percent', { unit: 'percent' });
+const resourceMemoryHistogram = meter.createHistogram('node_process_memory_rss_mb', { unit: 'MB' });
+const resourceHeapHistogram = meter.createHistogram('node_process_heap_used_mb', { unit: 'MB' });
+
+let lastResourceWall = process.hrtime.bigint();
+let lastResourceCpu = process.cpuUsage();
 
 const mysqlPool = mysql.createPool({
   host: process.env.MYSQL_HOST || 'mysql',
@@ -114,6 +123,54 @@ function log(severity, message, context = {}) {
   process.stdout.write(entry + '\n');
 }
 
+function sampleProcessResources() {
+  const nowWall = process.hrtime.bigint();
+  const nowCpu = process.cpuUsage();
+  const wallMicros = Math.max(Number(nowWall - lastResourceWall) / 1000, 1);
+  const cpuMicros = Math.max((nowCpu.user - lastResourceCpu.user) + (nowCpu.system - lastResourceCpu.system), 0);
+  lastResourceWall = nowWall;
+  lastResourceCpu = nowCpu;
+
+  const memory = process.memoryUsage();
+  return {
+    pid: process.pid,
+    cpuPercent: Number(((cpuMicros / wallMicros) * 100).toFixed(2)),
+    memoryRssMb: Number((memory.rss / (1024 * 1024)).toFixed(2)),
+    heapUsedMb: Number((memory.heapUsed / (1024 * 1024)).toFixed(2)),
+  };
+}
+
+function recordProcessResources(scope, extra = {}, emitLog = false) {
+  const snapshot = sampleProcessResources();
+  const attrs = {
+    scope,
+    component: 'runtime',
+    pid: snapshot.pid,
+    ...extra,
+  };
+
+  resourceCpuHistogram.record(snapshot.cpuPercent, attrs);
+  resourceMemoryHistogram.record(snapshot.memoryRssMb, attrs);
+  resourceHeapHistogram.record(snapshot.heapUsedMb, attrs);
+
+  const thresholdExceeded = snapshot.cpuPercent >= resourceWarnCpuPercent || snapshot.memoryRssMb >= resourceWarnMemoryMb;
+  if (emitLog || thresholdExceeded) {
+    log(thresholdExceeded ? 'WARN' : 'INFO', thresholdExceeded ? 'node resource threshold exceeded' : 'node resource snapshot', {
+      scope,
+      component: 'runtime',
+      pid: snapshot.pid,
+      cpu_percent: snapshot.cpuPercent,
+      memory_rss_mb: snapshot.memoryRssMb,
+      heap_used_mb: snapshot.heapUsedMb,
+      cpu_warn_percent: resourceWarnCpuPercent,
+      memory_warn_mb: resourceWarnMemoryMb,
+      ...extra,
+    });
+  }
+
+  return snapshot;
+}
+
 app.use((req, res, next) => {
   req.requestId = req.get('x-request-id') || generateRequestId();
   res.setHeader('x-request-id', req.requestId);
@@ -124,6 +181,7 @@ app.use((req, res, next) => {
     const attrs = { route: req.path, status: res.statusCode };
     requestCounter.add(1, attrs);
     latencyHistogram.record(duration, attrs);
+    recordProcessResources('request', { route: req.path, status: res.statusCode });
     log('INFO', 'node request complete', { path: req.path, status: res.statusCode, duration_ms: Number(duration.toFixed(2)), request_id: req.requestId });
     if (duration >= slowLogThresholdMs) {
       log('WARN', 'node request exceeded slow threshold', {
@@ -263,5 +321,12 @@ app.listen(Number(process.env.APP_PORT || '3000'), '0.0.0.0', () => {
     failure_rate_percent: failureRatePercent,
     slow_log_threshold_ms: slowLogThresholdMs,
     db_bottleneck_loops: dbBottleneckLoops,
+    resource_sample_interval_ms: resourceSampleIntervalMs,
+    resource_warn_cpu_percent: resourceWarnCpuPercent,
+    resource_warn_memory_mb: resourceWarnMemoryMb,
   });
 });
+
+setInterval(() => {
+  recordProcessResources('background', { source: 'resource_sampler' }, true);
+}, resourceSampleIntervalMs).unref();

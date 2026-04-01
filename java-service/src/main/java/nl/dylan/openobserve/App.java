@@ -1,5 +1,6 @@
 package nl.dylan.openobserve;
 
+import com.sun.management.OperatingSystemMXBean;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.Headers;
@@ -28,6 +29,7 @@ import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.management.ManagementFactory;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -37,6 +39,8 @@ import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import redis.clients.jedis.Jedis;
 
 public final class App {
@@ -48,7 +52,11 @@ public final class App {
   private static final int PORT = Integer.parseInt(System.getenv().getOrDefault("APP_PORT", "8081"));
   private static final int FAILURE_RATE_PERCENT = Integer.parseInt(System.getenv().getOrDefault("APP_SYNTHETIC_FAILURE_RATE_PERCENT", "26"));
   private static final long SLOW_LOG_THRESHOLD_MS = Long.parseLong(System.getenv().getOrDefault("APP_SLOW_LOG_THRESHOLD_MS", "110"));
+  private static final long RESOURCE_SAMPLE_INTERVAL_MS = Long.parseLong(System.getenv().getOrDefault("APP_RESOURCE_SAMPLE_INTERVAL_MS", "10000"));
+  private static final double RESOURCE_WARN_CPU_PERCENT = Double.parseDouble(System.getenv().getOrDefault("APP_RESOURCE_WARN_CPU_PERCENT", "35"));
+  private static final double RESOURCE_WARN_MEMORY_MB = Double.parseDouble(System.getenv().getOrDefault("APP_RESOURCE_WARN_MEMORY_MB", "180"));
   private static final Random RANDOM = new Random();
+  private static final OperatingSystemMXBean OS_BEAN = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
   private static final TextMapGetter<Headers> HEADER_GETTER = new TextMapGetter<>() {
     @Override
     public Iterable<String> keys(Headers carrier) {
@@ -101,9 +109,13 @@ public final class App {
     LongCounter requestCounter = meter.counterBuilder("java_requests_total").build();
     LongCounter errorCounter = meter.counterBuilder("java_errors_total").build();
     DoubleHistogram latencyHistogram = meter.histogramBuilder("java_request_duration_ms").setUnit("ms").build();
+    DoubleHistogram resourceCpuHistogram = meter.histogramBuilder("java_process_cpu_percent").setUnit("percent").build();
+    DoubleHistogram resourceMemoryHistogram = meter.histogramBuilder("java_process_memory_used_mb").setUnit("MB").build();
+    DoubleHistogram resourceCommittedMemoryHistogram = meter.histogramBuilder("java_process_memory_committed_mb").setUnit("MB").build();
 
     HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
     server.setExecutor(Executors.newFixedThreadPool(8));
+    ScheduledExecutorService resourceSampler = Executors.newSingleThreadScheduledExecutor();
 
     server.createContext("/healthz", exchange -> {
       String requestId = getRequestId(exchange);
@@ -113,6 +125,7 @@ public final class App {
       writeJson(exchange, 200, "{\"ok\":true,\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\"}");
       double durationMs = (System.nanoTime() - start) / 1_000_000.0;
       latencyHistogram.record(durationMs, requestAttributes("/healthz", 200));
+      recordResourceMetrics(resourceCpuHistogram, resourceMemoryHistogram, resourceCommittedMemoryHistogram, "request", "/healthz", 200, false);
       log("INFO", "java health served", Map.of("request_id", requestId, "status", 200, "duration_ms", roundDuration(durationMs)));
     });
 
@@ -152,6 +165,7 @@ public final class App {
         double durationMs = (System.nanoTime() - start) / 1_000_000.0;
         requestCounter.add(1, requestAttributes("/quote", statusCode[0]));
         latencyHistogram.record(durationMs, requestAttributes("/quote", statusCode[0]));
+        recordResourceMetrics(resourceCpuHistogram, resourceMemoryHistogram, resourceCommittedMemoryHistogram, "request", "/quote", statusCode[0], false);
         log("INFO", "java request complete", Map.of("path", "/quote", "status", statusCode[0], "duration_ms", roundDuration(durationMs), "request_id", requestId));
         if (durationMs >= SLOW_LOG_THRESHOLD_MS) {
           log("WARN", "java request exceeded slow threshold", Map.of("path", "/quote", "status", statusCode[0], "duration_ms", roundDuration(durationMs), "request_id", requestId));
@@ -164,7 +178,17 @@ public final class App {
         "port", PORT,
         "otlp", OTLP_ENDPOINT,
         "failure_rate_percent", FAILURE_RATE_PERCENT,
-        "slow_log_threshold_ms", SLOW_LOG_THRESHOLD_MS));
+        "slow_log_threshold_ms", SLOW_LOG_THRESHOLD_MS,
+        "resource_sample_interval_ms", RESOURCE_SAMPLE_INTERVAL_MS,
+        "resource_warn_cpu_percent", RESOURCE_WARN_CPU_PERCENT,
+        "resource_warn_memory_mb", RESOURCE_WARN_MEMORY_MB));
+    resourceSampler.scheduleAtFixedRate(() -> {
+      try {
+        recordResourceMetrics(resourceCpuHistogram, resourceMemoryHistogram, resourceCommittedMemoryHistogram, "background", "", 0, true);
+      } catch (IOException error) {
+        error.printStackTrace(System.err);
+      }
+    }, RESOURCE_SAMPLE_INTERVAL_MS, RESOURCE_SAMPLE_INTERVAL_MS, TimeUnit.MILLISECONDS);
     server.start();
   }
 
@@ -190,6 +214,75 @@ public final class App {
         .put(AttributeKey.stringKey("route"), route)
         .put(AttributeKey.longKey("status"), statusCode)
         .build();
+  }
+
+  private static void recordResourceMetrics(
+      DoubleHistogram cpuHistogram,
+      DoubleHistogram memoryHistogram,
+      DoubleHistogram committedMemoryHistogram,
+      String scope,
+      String route,
+      int statusCode,
+      boolean emitLog) throws IOException {
+    Map<String, Double> memoryStats = memoryStatsMb();
+    double cpuPercent = processCpuPercent();
+    long pid = ProcessHandle.current().pid();
+
+    Attributes.Builder attrs = Attributes.builder()
+        .put(AttributeKey.stringKey("scope"), scope)
+        .put(AttributeKey.stringKey("component"), "runtime")
+        .put(AttributeKey.longKey("pid"), pid);
+    if (!route.isBlank()) {
+      attrs.put(AttributeKey.stringKey("route"), route);
+    }
+    if (statusCode > 0) {
+      attrs.put(AttributeKey.longKey("status"), statusCode);
+    }
+
+    Attributes attributes = attrs.build();
+    cpuHistogram.record(cpuPercent, attributes);
+    memoryHistogram.record(memoryStats.get("used_mb"), attributes);
+    committedMemoryHistogram.record(memoryStats.get("committed_mb"), attributes);
+
+    boolean thresholdExceeded = cpuPercent >= RESOURCE_WARN_CPU_PERCENT || memoryStats.get("used_mb") >= RESOURCE_WARN_MEMORY_MB;
+    if (emitLog || thresholdExceeded) {
+      Map<String, Object> context = new LinkedHashMap<>();
+      context.put("scope", scope);
+      context.put("component", "runtime");
+      context.put("pid", pid);
+      context.put("route", route);
+      context.put("status", statusCode);
+      context.put("cpu_percent", cpuPercent);
+      context.put("memory_used_mb", memoryStats.get("used_mb"));
+      context.put("memory_committed_mb", memoryStats.get("committed_mb"));
+      context.put("memory_max_mb", memoryStats.get("max_mb"));
+      context.put("cpu_warn_percent", RESOURCE_WARN_CPU_PERCENT);
+      context.put("memory_warn_mb", RESOURCE_WARN_MEMORY_MB);
+      log(thresholdExceeded ? "WARN" : "INFO", thresholdExceeded ? "java resource threshold exceeded" : "java resource snapshot", context);
+    }
+  }
+
+  private static double processCpuPercent() {
+    if (OS_BEAN == null) {
+      return 0.0;
+    }
+    double cpuLoad = OS_BEAN.getProcessCpuLoad();
+    if (cpuLoad < 0) {
+      return 0.0;
+    }
+    return roundDuration(cpuLoad * 100.0);
+  }
+
+  private static Map<String, Double> memoryStatsMb() {
+    Runtime runtime = Runtime.getRuntime();
+    double usedMb = roundDuration((runtime.totalMemory() - runtime.freeMemory()) / (1024.0 * 1024.0));
+    double committedMb = roundDuration(runtime.totalMemory() / (1024.0 * 1024.0));
+    double maxMb = roundDuration(runtime.maxMemory() / (1024.0 * 1024.0));
+    Map<String, Double> stats = new LinkedHashMap<>();
+    stats.put("used_mb", usedMb);
+    stats.put("committed_mb", committedMb);
+    stats.put("max_mb", maxMb);
+    return stats;
   }
 
   private static double roundDuration(double durationMs) {
