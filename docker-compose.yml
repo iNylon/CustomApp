@@ -68,6 +68,10 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc
       APP_DB_BOTTLENECK_MODE: "true"
       APP_DB_BOTTLENECK_LOOPS: "14"
+      APP_METRIC_KEEPALIVE_ENABLED: "true"
+      APP_METRIC_KEEPALIVE_INTERVAL_SECONDS: "30"
+      APP_METRIC_KEEPALIVE_START_DELAY_SECONDS: "15"
+      PHP_STOREFRONT_URL: http://php-storefront:8080
     depends_on:
       - postgres
       - redis

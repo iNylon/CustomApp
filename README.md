@@ -44,6 +44,7 @@ Beschikbare endpoints:
 - De PHP-app roept Node, Python en Java aan.
 - Node leest productdata uit MySQL.
 - Python leest user/recommendation data uit PostgreSQL en gebruikt Redis caching.
+- Python draait ook een keepalive-flow die de storefront periodiek door auth, summary, checkout en fault-paden laat lopen zodat dashboards continu metrics blijven ontvangen.
 - Java simuleert checkout- en payment-achtige flows met Redis en foutinjectie.
 - Alle services schrijven structured logs naar `/var/telemetry-logs/*.log`, die door de collector worden ingelezen.
 
