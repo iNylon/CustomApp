@@ -28,9 +28,12 @@ LOG_FILE = os.getenv("APP_LOG_FILE", "/tmp/python-recommendation.log")
 OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317")
 DB_BOTTLENECK_MODE = os.getenv("APP_DB_BOTTLENECK_MODE", "true").lower() != "false"
 DB_BOTTLENECK_LOOPS = max(1, int(os.getenv("APP_DB_BOTTLENECK_LOOPS", "10")))
+SERVICE_FAILURE_RATE_PERCENT = max(0, min(100, int(os.getenv("APP_SYNTHETIC_FAILURE_RATE_PERCENT", "28"))))
 KEEPALIVE_ENABLED = os.getenv("APP_METRIC_KEEPALIVE_ENABLED", "true").lower() != "false"
 KEEPALIVE_INTERVAL_SECONDS = max(10, int(os.getenv("APP_METRIC_KEEPALIVE_INTERVAL_SECONDS", "30")))
 KEEPALIVE_START_DELAY_SECONDS = max(1, int(os.getenv("APP_METRIC_KEEPALIVE_START_DELAY_SECONDS", "12")))
+KEEPALIVE_ROUNDS_PER_CYCLE = max(1, int(os.getenv("APP_METRIC_KEEPALIVE_ROUNDS_PER_CYCLE", "2")))
+KEEPALIVE_BETWEEN_REQUESTS_MS = max(0, int(os.getenv("APP_METRIC_KEEPALIVE_BETWEEN_REQUESTS_MS", "200")))
 PHP_STOREFRONT_URL = os.getenv("PHP_STOREFRONT_URL", "http://php-storefront:8080").rstrip("/")
 PYTHON_PUBLIC_URL = os.getenv("PYTHON_PUBLIC_URL", "http://python-recommendation:8000").rstrip("/")
 NODE_SERVICE_URL = os.getenv("NODE_SERVICE_URL", "http://node-catalog:3000").rstrip("/")
@@ -148,11 +151,21 @@ def apply_error_attributes(span, error: Exception):
         span.set_attribute(key, value)
 
 
-def http_json(method: str, url: str, session: Optional[requests.Session] = None, expected_statuses: tuple[int, ...] = (200,), **kwargs):
+def pause_between_keepalive_calls():
+    if KEEPALIVE_BETWEEN_REQUESTS_MS > 0:
+        time.sleep(KEEPALIVE_BETWEEN_REQUESTS_MS / 1000)
+
+
+def http_request(method: str, url: str, session: Optional[requests.Session] = None, expected_statuses: tuple[int, ...] = (200,), **kwargs):
     client = session or requests
     response = client.request(method=method, url=url, timeout=8, **kwargs)
     if response.status_code not in expected_statuses:
         raise RuntimeError(f"unexpected status {response.status_code} from {url}")
+    return response
+
+
+def http_json(method: str, url: str, session: Optional[requests.Session] = None, expected_statuses: tuple[int, ...] = (200,), **kwargs):
+    response = http_request(method, url, session=session, expected_statuses=expected_statuses, **kwargs)
     payload = {}
     if response.content:
         payload = response.json()
@@ -184,80 +197,249 @@ def ensure_storefront_user(session: requests.Session):
     }
 
 
+def hit_fault_endpoints(session: requests.Session):
+    results = {}
+    for target in ("mysql", "postgres", "redis", "php", "nodejs", "java", "python"):
+        payload, status = http_json(
+            "POST",
+            f"{PHP_STOREFRONT_URL}/api/fault/{target}",
+            session=session,
+        )
+        results[target] = {"status": status, "ok": bool(payload.get("ok")), "error": str(payload.get("error", ""))}
+        pause_between_keepalive_calls()
+    return results
+
+
+def hit_direct_service_endpoints(session: requests.Session):
+    node_health, _ = http_json("GET", f"{NODE_SERVICE_URL}/healthz", session=session)
+    pause_between_keepalive_calls()
+    node_ok, node_status = http_json("GET", f"{NODE_SERVICE_URL}/inventory", session=session, expected_statuses=(200, 503))
+    pause_between_keepalive_calls()
+    node_fail, node_fail_status = http_json("GET", f"{NODE_SERVICE_URL}/inventory?fail=1", session=session, expected_statuses=(503,))
+    pause_between_keepalive_calls()
+
+    java_health, _ = http_json("GET", f"{JAVA_SERVICE_URL}/healthz", session=session)
+    pause_between_keepalive_calls()
+    java_ok, java_status = http_json("GET", f"{JAVA_SERVICE_URL}/quote", session=session, expected_statuses=(200, 503))
+    pause_between_keepalive_calls()
+    java_fail, java_fail_status = http_json("GET", f"{JAVA_SERVICE_URL}/quote?fail=1", session=session, expected_statuses=(503,))
+    pause_between_keepalive_calls()
+
+    python_health, _ = http_json("GET", f"{PYTHON_PUBLIC_URL}/healthz", session=session)
+    pause_between_keepalive_calls()
+    python_ok, python_status = http_json("GET", f"{PYTHON_PUBLIC_URL}/recommendations?user_id=1", session=session, expected_statuses=(200, 503))
+    pause_between_keepalive_calls()
+    python_fail, python_fail_status = http_json("GET", f"{PYTHON_PUBLIC_URL}/recommendations?user_id=1&fail=1", session=session, expected_statuses=(503,))
+
+    return {
+        "node": {
+            "health_ok": bool(node_health.get("ok")),
+            "status": node_status,
+            "items": len(node_ok.get("items", [])),
+            "fail_status": node_fail_status,
+            "fail_error": str(node_fail.get("error", "")),
+        },
+        "java": {
+            "health_ok": bool(java_health.get("ok")),
+            "status": java_status,
+            "quote": float(java_ok.get("quote") or 0.0) if java_status == 200 else 0.0,
+            "fail_status": java_fail_status,
+            "fail_error": str(java_fail.get("error", "")),
+        },
+        "python": {
+            "health_ok": bool(python_health.get("ok")),
+            "status": python_status,
+            "items": len(python_ok.get("items", [])),
+            "fail_status": python_fail_status,
+            "fail_error": str(python_fail.get("error", "")),
+        },
+    }
+
+
 def run_dashboard_keepalive_cycle():
-    session = requests.Session()
-    session.headers.update({"x-telemetry-source": "python-dashboard-keepalive"})
     cycle_id = f"keepalive-{uuid.uuid4().hex[:12]}"
 
-    with tracer.start_as_current_span(
-        "python.dashboard_keepalive",
-        kind=SpanKind.INTERNAL,
-        attributes={"keepalive.cycle_id": cycle_id, "keepalive.interval_seconds": KEEPALIVE_INTERVAL_SECONDS},
-    ) as span:
-        try:
-            span.set_attribute("keepalive.php_base_url", PHP_STOREFRONT_URL)
-            span.set_attribute("keepalive.synthetic_user", SYNTHETIC_USER_EMAIL)
+    with requests.Session() as session:
+        session.headers.update({"x-telemetry-source": "python-dashboard-keepalive"})
 
-            user_state = ensure_storefront_user(session)
-            summary_payload, summary_status = http_json("GET", f"{PHP_STOREFRONT_URL}/api/summary", session=session, expected_statuses=(200, 206))
-            checkout_payload, checkout_status = http_json(
-                "POST",
-                f"{PHP_STOREFRONT_URL}/api/checkout",
-                session=session,
-                json={"items": [{"sku": "SKU-100", "quantity": 1}, {"sku": "SKU-101", "quantity": 2}]},
-            )
-            _, orders_status = http_json("GET", f"{PHP_STOREFRONT_URL}/api/orders", session=session)
-            invalid_checkout_payload, invalid_checkout_status = http_json(
-                "POST",
-                f"{PHP_STOREFRONT_URL}/api/checkout",
-                session=session,
-                expected_statuses=(500,),
-                json={"items": [{"sku": "SKU-DOES-NOT-EXIST", "quantity": 1}]},
-            )
+        with tracer.start_as_current_span(
+            "python.dashboard_keepalive",
+            kind=SpanKind.INTERNAL,
+            attributes={
+                "keepalive.cycle_id": cycle_id,
+                "keepalive.interval_seconds": KEEPALIVE_INTERVAL_SECONDS,
+                "keepalive.rounds_per_cycle": KEEPALIVE_ROUNDS_PER_CYCLE,
+            },
+        ) as span:
+            try:
+                span.set_attribute("keepalive.php_base_url", PHP_STOREFRONT_URL)
+                span.set_attribute("keepalive.synthetic_user", SYNTHETIC_USER_EMAIL)
 
-            node_fault_payload, _ = http_json("POST", f"{PHP_STOREFRONT_URL}/api/fault/nodejs", session=session)
-            java_fault_payload, _ = http_json("POST", f"{PHP_STOREFRONT_URL}/api/fault/java", session=session)
-            python_fault_payload, _ = http_json("POST", f"{PHP_STOREFRONT_URL}/api/fault/python", session=session)
-            recommendation_payload, _ = http_json("GET", f"{PYTHON_PUBLIC_URL}/recommendations?user_id=1", session=session)
-            _, logout_status = http_json("POST", f"{PHP_STOREFRONT_URL}/api/logout", session=session)
+                user_state = ensure_storefront_user(session)
+                login_failure_payload, login_failure_status = http_json(
+                    "POST",
+                    f"{PHP_STOREFRONT_URL}/api/login",
+                    session=session,
+                    expected_statuses=(401,),
+                    json={"email": SYNTHETIC_USER_EMAIL, "password": SYNTHETIC_USER_PASSWORD + "-wrong"},
+                )
+                pause_between_keepalive_calls()
 
-            span.set_attribute("keepalive.summary_status", summary_status)
-            span.set_attribute("keepalive.checkout_status", checkout_status)
-            span.set_attribute("keepalive.orders_status", orders_status)
-            span.set_attribute("keepalive.invalid_checkout_status", invalid_checkout_status)
-            span.set_attribute("keepalive.logout_status", logout_status)
-            span.set_attribute("keepalive.summary_degraded", bool(summary_payload.get("degraded")))
-            span.set_attribute("keepalive.checkout_success", bool(checkout_payload.get("checkout_success")))
-            span.set_attribute("keepalive.order_total", float(checkout_payload.get("order_total") or 0.0))
-            span.set_attribute("keepalive.recommendation_items", len(recommendation_payload.get("items", [])))
-            span.set_attribute("keepalive.node_fault_ok", bool(node_fault_payload.get("ok")))
-            span.set_attribute("keepalive.java_fault_ok", bool(java_fault_payload.get("ok")))
-            span.set_attribute("keepalive.python_fault_ok", bool(python_fault_payload.get("ok")))
-            span.set_attribute("keepalive.register_status", int(user_state["register_status"]))
-            span.set_attribute("keepalive.synthetic_user_id", int(user_state["login_user_id"]))
-            span.set_attribute("keepalive.invalid_checkout_error", str(invalid_checkout_payload.get("error", "")))
+                summary_statuses = []
+                checkout_statuses = []
+                checkout_totals = []
+                component_error_counts = []
+                invalid_checkout_statuses = []
+                empty_checkout_statuses = []
+                logout_statuses = []
+                not_found_statuses = []
+                direct_statuses = []
+                all_faults = {}
 
-            log(
-                "INFO",
-                "dashboard keepalive cycle completed",
-                cycle_id=cycle_id,
-                synthetic_user=SYNTHETIC_USER_EMAIL,
-                register_status=user_state["register_status"],
-                summary_status=summary_status,
-                checkout_status=checkout_status,
-                orders_status=orders_status,
-                invalid_checkout_status=invalid_checkout_status,
-                logout_status=logout_status,
-                order_total=checkout_payload.get("order_total", 0.0),
-                summary_degraded=bool(summary_payload.get("degraded")),
-                component_errors=int(summary_payload.get("component_errors", 0)),
-                recommendation_items=len(recommendation_payload.get("items", [])),
-            )
-        except Exception as error:
-            span.record_exception(error)
-            apply_error_attributes(span, attach_error_context(error, keepalive_cycle_id=cycle_id, keepalive_component="dashboard_keepalive"))
-            span.set_status(Status(StatusCode.ERROR, str(error)))
-            log("ERROR", "dashboard keepalive cycle failed", cycle_id=cycle_id, error=str(error), error_type=error.__class__.__name__)
+                http_request("GET", f"{PHP_STOREFRONT_URL}/", session=session)
+                pause_between_keepalive_calls()
+                http_request("GET", f"{PHP_STOREFRONT_URL}/auth", session=session)
+                pause_between_keepalive_calls()
+                http_json("GET", f"{PHP_STOREFRONT_URL}/healthz", session=session)
+                pause_between_keepalive_calls()
+                http_json("GET", f"{PHP_STOREFRONT_URL}/api/me", session=session)
+                pause_between_keepalive_calls()
+
+                for round_index in range(KEEPALIVE_ROUNDS_PER_CYCLE):
+                    summary_payload, summary_status = http_json(
+                        "GET",
+                        f"{PHP_STOREFRONT_URL}/api/summary?round={round_index}",
+                        session=session,
+                        expected_statuses=(200, 206),
+                    )
+                    summary_statuses.append(summary_status)
+                    component_error_counts.append(int(summary_payload.get("component_errors", 0)))
+                    pause_between_keepalive_calls()
+
+                    checkout_payload, checkout_status = http_json(
+                        "POST",
+                        f"{PHP_STOREFRONT_URL}/api/checkout",
+                        session=session,
+                        json={"items": [{"sku": "SKU-100", "quantity": 1}, {"sku": "SKU-101", "quantity": 2}, {"sku": "SKU-102", "quantity": 1}]},
+                    )
+                    checkout_statuses.append(checkout_status)
+                    checkout_totals.append(float(checkout_payload.get("order_total") or 0.0))
+                    pause_between_keepalive_calls()
+
+                    _, orders_status = http_json("GET", f"{PHP_STOREFRONT_URL}/api/orders", session=session)
+                    pause_between_keepalive_calls()
+
+                    invalid_checkout_payload, invalid_checkout_status = http_json(
+                        "POST",
+                        f"{PHP_STOREFRONT_URL}/api/checkout",
+                        session=session,
+                        expected_statuses=(500,),
+                        json={"items": [{"sku": f"SKU-DOES-NOT-EXIST-{round_index}", "quantity": 1}]},
+                    )
+                    invalid_checkout_statuses.append(invalid_checkout_status)
+                    pause_between_keepalive_calls()
+
+                    _, empty_checkout_status = http_json(
+                        "POST",
+                        f"{PHP_STOREFRONT_URL}/api/checkout",
+                        session=session,
+                        expected_statuses=(422,),
+                        json={"items": []},
+                    )
+                    empty_checkout_statuses.append(empty_checkout_status)
+                    pause_between_keepalive_calls()
+
+                    http_json(
+                        "GET",
+                        f"{PHP_STOREFRONT_URL}/api/does-not-exist-{round_index}-{random.randint(100, 999)}",
+                        session=session,
+                        expected_statuses=(404,),
+                    )
+                    not_found_statuses.append(404)
+                    pause_between_keepalive_calls()
+
+                    http_json("GET", f"{PHP_STOREFRONT_URL}/api/error?round={round_index}", session=session, expected_statuses=(500,))
+                    pause_between_keepalive_calls()
+
+                    fault_results = hit_fault_endpoints(session)
+                    all_faults.update(fault_results)
+                    pause_between_keepalive_calls()
+
+                    direct_results = hit_direct_service_endpoints(session)
+                    direct_statuses.extend([
+                        direct_results["node"]["status"],
+                        direct_results["node"]["fail_status"],
+                        direct_results["java"]["status"],
+                        direct_results["java"]["fail_status"],
+                        direct_results["python"]["status"],
+                        direct_results["python"]["fail_status"],
+                    ])
+                    pause_between_keepalive_calls()
+
+                    _, orders_status_after = http_json("GET", f"{PHP_STOREFRONT_URL}/api/orders", session=session)
+                    span.set_attribute(f"keepalive.orders_status_round_{round_index}", orders_status_after)
+                    pause_between_keepalive_calls()
+
+                _, logout_status = http_json("POST", f"{PHP_STOREFRONT_URL}/api/logout", session=session)
+                logout_statuses.append(logout_status)
+
+                recommendation_payload, recommendation_status = http_json(
+                    "GET",
+                    f"{PYTHON_PUBLIC_URL}/recommendations?user_id=1",
+                    session=session,
+                    expected_statuses=(200, 503),
+                )
+
+                span.set_attribute("keepalive.login_failure_status", login_failure_status)
+                span.set_attribute("keepalive.summary_status", max(summary_statuses) if summary_statuses else 0)
+                span.set_attribute("keepalive.checkout_status", max(checkout_statuses) if checkout_statuses else 0)
+                span.set_attribute("keepalive.orders_status", 200)
+                span.set_attribute("keepalive.invalid_checkout_status", max(invalid_checkout_statuses) if invalid_checkout_statuses else 0)
+                span.set_attribute("keepalive.empty_checkout_status", max(empty_checkout_statuses) if empty_checkout_statuses else 0)
+                span.set_attribute("keepalive.logout_status", max(logout_statuses) if logout_statuses else 0)
+                span.set_attribute("keepalive.not_found_status", max(not_found_statuses) if not_found_statuses else 0)
+                span.set_attribute("keepalive.summary_degraded", any(status == 206 for status in summary_statuses))
+                span.set_attribute("keepalive.checkout_success", any(status == 200 for status in checkout_statuses))
+                span.set_attribute("keepalive.order_total", round(sum(checkout_totals), 2))
+                span.set_attribute("keepalive.recommendation_items", len(recommendation_payload.get("items", [])))
+                span.set_attribute("keepalive.recommendation_status", recommendation_status)
+                span.set_attribute("keepalive.register_status", int(user_state["register_status"]))
+                span.set_attribute("keepalive.synthetic_user_id", int(user_state["login_user_id"]))
+                span.set_attribute("keepalive.round_count", KEEPALIVE_ROUNDS_PER_CYCLE)
+                span.set_attribute("keepalive.component_errors", sum(component_error_counts))
+                span.set_attribute("keepalive.direct_error_count", len([status for status in direct_statuses if status >= 500]))
+                span.set_attribute("keepalive.fault_target_count", len(all_faults))
+
+                log(
+                    "INFO",
+                    "dashboard keepalive cycle completed",
+                    cycle_id=cycle_id,
+                    synthetic_user=SYNTHETIC_USER_EMAIL,
+                    register_status=user_state["register_status"],
+                    summary_status=max(summary_statuses) if summary_statuses else 0,
+                    checkout_status=max(checkout_statuses) if checkout_statuses else 0,
+                    orders_status=200,
+                    invalid_checkout_status=max(invalid_checkout_statuses) if invalid_checkout_statuses else 0,
+                    logout_status=max(logout_statuses) if logout_statuses else 0,
+                    order_total=round(sum(checkout_totals), 2),
+                    summary_degraded=any(status == 206 for status in summary_statuses),
+                    component_errors=sum(component_error_counts),
+                    recommendation_items=len(recommendation_payload.get("items", [])),
+                    interval_seconds=KEEPALIVE_INTERVAL_SECONDS,
+                    round_count=KEEPALIVE_ROUNDS_PER_CYCLE,
+                    login_failure_status=login_failure_status,
+                    empty_checkout_status=max(empty_checkout_statuses) if empty_checkout_statuses else 0,
+                    not_found_status=max(not_found_statuses) if not_found_statuses else 0,
+                    fault_targets=",".join(sorted(all_faults.keys())),
+                    direct_error_count=len([status for status in direct_statuses if status >= 500]),
+                    invalid_checkout_error=str(invalid_checkout_payload.get("error", "")),
+                    login_failure_error=str(login_failure_payload.get("error", "")),
+                )
+            except Exception as error:
+                span.record_exception(error)
+                apply_error_attributes(span, attach_error_context(error, keepalive_cycle_id=cycle_id, keepalive_component="dashboard_keepalive"))
+                span.set_status(Status(StatusCode.ERROR, str(error)))
+                log("ERROR", "dashboard keepalive cycle failed", cycle_id=cycle_id, error=str(error), error_type=error.__class__.__name__)
 
 
 def start_keepalive_loop():
@@ -385,7 +567,7 @@ def recommendations():
                     },
                 )
 
-            if random.randint(1, 100) <= 12:
+            if random.randint(1, 100) <= SERVICE_FAILURE_RATE_PERCENT:
                 raise attach_error_context(
                     RuntimeError("python recommendation ranking failed while composing response"),
                     **{
@@ -416,7 +598,13 @@ def recommendations():
 
 
 if __name__ == "__main__":
-    log("INFO", "starting python recommendation service", endpoint=OTLP_ENDPOINT)
+    log(
+        "INFO",
+        "starting python recommendation service",
+        endpoint=OTLP_ENDPOINT,
+        failure_rate_percent=SERVICE_FAILURE_RATE_PERCENT,
+        db_bottleneck_loops=DB_BOTTLENECK_LOOPS,
+    )
     if KEEPALIVE_ENABLED:
         start_keepalive_loop()
         log(
@@ -424,6 +612,7 @@ if __name__ == "__main__":
             "dashboard keepalive enabled",
             interval_seconds=KEEPALIVE_INTERVAL_SECONDS,
             start_delay_seconds=KEEPALIVE_START_DELAY_SECONDS,
+            round_count=KEEPALIVE_ROUNDS_PER_CYCLE,
             php_storefront_url=PHP_STOREFRONT_URL,
         )
     app.run(host="0.0.0.0", port=int(os.getenv("APP_PORT", "8000")), threaded=True)

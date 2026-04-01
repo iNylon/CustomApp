@@ -267,6 +267,20 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
       return;
     }
 
+    if ($path === '/api/error') {
+      throw enrichThrowable(
+        new RuntimeException('php storefront synthetic error endpoint triggered'),
+        [
+          'component.name' => 'php-storefront',
+          'component.layer' => 'application',
+          'fault.target' => 'php',
+          'fault.synthetic' => true,
+          'http.route' => $path,
+          'request.id' => $requestId,
+        ]
+      );
+    }
+
     if (preg_match('#^/api/fault/(mysql|postgres|redis|php|python|java|nodejs)$#', $path, $matches) === 1 && $method === 'POST') {
       $target = $matches[1];
       $payload = triggerFault($target, $logger, $emitter, $rootSpan);

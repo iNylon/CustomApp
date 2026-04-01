@@ -68,10 +68,15 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc
       APP_DB_BOTTLENECK_MODE: "true"
       APP_DB_BOTTLENECK_LOOPS: "14"
+      APP_SYNTHETIC_FAILURE_RATE_PERCENT: "28"
       APP_METRIC_KEEPALIVE_ENABLED: "true"
-      APP_METRIC_KEEPALIVE_INTERVAL_SECONDS: "30"
-      APP_METRIC_KEEPALIVE_START_DELAY_SECONDS: "15"
+      APP_METRIC_KEEPALIVE_INTERVAL_SECONDS: "12"
+      APP_METRIC_KEEPALIVE_START_DELAY_SECONDS: "8"
+      APP_METRIC_KEEPALIVE_ROUNDS_PER_CYCLE: "2"
+      APP_METRIC_KEEPALIVE_BETWEEN_REQUESTS_MS: "120"
       PHP_STOREFRONT_URL: http://php-storefront:8080
+      NODE_SERVICE_URL: http://node-catalog:3000
+      JAVA_SERVICE_URL: http://java-checkout:8081
     depends_on:
       - postgres
       - redis
@@ -100,6 +105,8 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc
       APP_DB_BOTTLENECK_MODE: "true"
       APP_DB_BOTTLENECK_LOOPS: "16"
+      APP_SYNTHETIC_FAILURE_RATE_PERCENT: "24"
+      APP_SLOW_LOG_THRESHOLD_MS: "100"
     depends_on:
       - mysql
       - redis
@@ -117,7 +124,8 @@ services:
       APP_LOG_FILE: /var/telemetry-logs/java-checkout.log
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      APP_SYNTHETIC_FAILURE_RATE_PERCENT: "8"
+      APP_SYNTHETIC_FAILURE_RATE_PERCENT: "24"
+      APP_SLOW_LOG_THRESHOLD_MS: "100"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: java-checkout
       OTEL_RESOURCE_ATTRIBUTES: service.namespace=openobserve-poc,deployment.environment=poc

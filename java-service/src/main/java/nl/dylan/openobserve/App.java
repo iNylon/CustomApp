@@ -46,7 +46,8 @@ public final class App {
   private static final String REDIS_HOST = System.getenv().getOrDefault("REDIS_HOST", "redis");
   private static final int REDIS_PORT = Integer.parseInt(System.getenv().getOrDefault("REDIS_PORT", "6379"));
   private static final int PORT = Integer.parseInt(System.getenv().getOrDefault("APP_PORT", "8081"));
-  private static final int FAILURE_RATE_PERCENT = Integer.parseInt(System.getenv().getOrDefault("APP_SYNTHETIC_FAILURE_RATE_PERCENT", "8"));
+  private static final int FAILURE_RATE_PERCENT = Integer.parseInt(System.getenv().getOrDefault("APP_SYNTHETIC_FAILURE_RATE_PERCENT", "26"));
+  private static final long SLOW_LOG_THRESHOLD_MS = Long.parseLong(System.getenv().getOrDefault("APP_SLOW_LOG_THRESHOLD_MS", "110"));
   private static final Random RANDOM = new Random();
   private static final TextMapGetter<Headers> HEADER_GETTER = new TextMapGetter<>() {
     @Override
@@ -106,15 +107,20 @@ public final class App {
 
     server.createContext("/healthz", exchange -> {
       String requestId = getRequestId(exchange);
+      long start = System.nanoTime();
       exchange.getResponseHeaders().set("x-request-id", requestId);
-      requestCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/healthz"));
+      requestCounter.add(1, requestAttributes("/healthz", 200));
       writeJson(exchange, 200, "{\"ok\":true,\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\"}");
+      double durationMs = (System.nanoTime() - start) / 1_000_000.0;
+      latencyHistogram.record(durationMs, requestAttributes("/healthz", 200));
+      log("INFO", "java health served", Map.of("request_id", requestId, "status", 200, "duration_ms", roundDuration(durationMs)));
     });
 
     server.createContext("/quote", exchange -> {
       String requestId = getRequestId(exchange);
       exchange.getResponseHeaders().set("x-request-id", requestId);
       long start = System.nanoTime();
+      int[] statusCode = {200};
       Context parentContext = W3CTraceContextPropagator.getInstance().extract(Context.root(), exchange.getRequestHeaders(), HEADER_GETTER);
       Span span = tracer.spanBuilder("java.quote").setParent(parentContext).setSpanKind(SpanKind.SERVER).startSpan();
       try (Scope scope = span.makeCurrent(); Jedis jedis = new Jedis(REDIS_HOST, REDIS_PORT)) {
@@ -124,29 +130,41 @@ public final class App {
         boolean failure = RANDOM.nextInt(100) < Math.max(0, Math.min(FAILURE_RATE_PERCENT, 100));
         boolean forceFailure = "fail=1".equals(exchange.getRequestURI().getQuery());
 
-        requestCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
         if (forceFailure || failure) {
-          errorCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
           throw new RuntimeException("java checkout quote computation failed");
         }
 
         String body = "{\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\",\"quote\":" + quote + ",\"redis_marker\":\"" + jedis.get("java:last_quote") + "\"}";
         writeJson(exchange, 200, body);
-        log("INFO", "java quote served", Map.of("quote", quote, "request_id", requestId));
+        log("INFO", "java quote served", Map.of("quote", quote, "request_id", requestId, "status", 200));
       } catch (Exception error) {
+        statusCode[0] = 503;
         span.recordException(error);
         applyErrorAttributes(span, error, "java-checkout", "application");
         span.setStatus(StatusCode.ERROR, error.getMessage());
-        errorCounter.add(1, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
-        log("ERROR", "java quote failed", errorContextForLog(error, requestId));
+        errorCounter.add(1, requestAttributes("/quote", statusCode[0]));
+        Map<String, Object> errorContext = errorContextForLog(error, requestId);
+        errorContext.put("duration_ms", roundDuration((System.nanoTime() - start) / 1_000_000.0));
+        errorContext.put("status", statusCode[0]);
+        log("ERROR", "java quote failed", errorContext);
         writeJson(exchange, 503, "{\"error\":\"" + error.getMessage() + "\",\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\"}");
       } finally {
-        latencyHistogram.record((System.nanoTime() - start) / 1_000_000.0, Attributes.of(AttributeKey.stringKey("route"), "/quote"));
+        double durationMs = (System.nanoTime() - start) / 1_000_000.0;
+        requestCounter.add(1, requestAttributes("/quote", statusCode[0]));
+        latencyHistogram.record(durationMs, requestAttributes("/quote", statusCode[0]));
+        log("INFO", "java request complete", Map.of("path", "/quote", "status", statusCode[0], "duration_ms", roundDuration(durationMs), "request_id", requestId));
+        if (durationMs >= SLOW_LOG_THRESHOLD_MS) {
+          log("WARN", "java request exceeded slow threshold", Map.of("path", "/quote", "status", statusCode[0], "duration_ms", roundDuration(durationMs), "request_id", requestId));
+        }
         span.end();
       }
     });
 
-    log("INFO", "starting java checkout service", Map.of("port", PORT, "otlp", OTLP_ENDPOINT));
+    log("INFO", "starting java checkout service", Map.of(
+        "port", PORT,
+        "otlp", OTLP_ENDPOINT,
+        "failure_rate_percent", FAILURE_RATE_PERCENT,
+        "slow_log_threshold_ms", SLOW_LOG_THRESHOLD_MS));
     server.start();
   }
 
@@ -165,6 +183,17 @@ public final class App {
     try (OutputStream outputStream = exchange.getResponseBody()) {
       outputStream.write(bytes);
     }
+  }
+
+  private static Attributes requestAttributes(String route, int statusCode) {
+    return Attributes.builder()
+        .put(AttributeKey.stringKey("route"), route)
+        .put(AttributeKey.longKey("status"), statusCode)
+        .build();
+  }
+
+  private static double roundDuration(double durationMs) {
+    return Math.round(durationMs * 100.0) / 100.0;
   }
 
   private static void log(String severity, String message, Map<String, Object> context) throws IOException {

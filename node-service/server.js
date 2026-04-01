@@ -15,6 +15,8 @@ const logFile = process.env.APP_LOG_FILE || '/tmp/node-catalog.log';
 const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317';
 const dbBottleneckMode = (process.env.APP_DB_BOTTLENECK_MODE || 'true').toLowerCase() !== 'false';
 const dbBottleneckLoops = Math.max(1, Number(process.env.APP_DB_BOTTLENECK_LOOPS || '12'));
+const failureRatePercent = Math.max(0, Math.min(100, Number(process.env.APP_SYNTHETIC_FAILURE_RATE_PERCENT || '26')));
+const slowLogThresholdMs = Math.max(50, Number(process.env.APP_SLOW_LOG_THRESHOLD_MS || '110'));
 
 const sdk = new NodeSDK({
   resource: new Resource({
@@ -123,6 +125,14 @@ app.use((req, res, next) => {
     requestCounter.add(1, attrs);
     latencyHistogram.record(duration, attrs);
     log('INFO', 'node request complete', { path: req.path, status: res.statusCode, duration_ms: Number(duration.toFixed(2)), request_id: req.requestId });
+    if (duration >= slowLogThresholdMs) {
+      log('WARN', 'node request exceeded slow threshold', {
+        path: req.path,
+        status: res.statusCode,
+        duration_ms: Number(duration.toFixed(2)),
+        request_id: req.requestId,
+      });
+    }
   });
   next();
 });
@@ -137,16 +147,39 @@ app.get('/inventory', async (req, res) => {
       span.setAttribute('request.id', req.requestId);
       const [rows] = await mysqlPool.query('SELECT sku, name, category, price, inventory FROM products ORDER BY id LIMIT 25');
       const wasteQueryCount = dbBottleneckMode ? await induceMysqlBottleneck(rows) : 0;
+      const inventoryTotal = rows.reduce((total, row) => total + Number(row.inventory || 0), 0);
       await redis.set('node:last_inventory_fetch', new Date().toISOString());
+      const forceFailure = req.query.fail === '1';
+      const syntheticFailure = Math.random() * 100 < failureRatePercent;
 
-      if (req.query.fail === '1') {
-        throw new Error('node inventory lookup failed during catalog processing');
+      if (forceFailure || syntheticFailure) {
+        throw attachErrorContext(
+          new Error('node inventory lookup failed during catalog processing'),
+          {
+            failure_mode: forceFailure ? 'forced' : 'synthetic',
+            failure_rate_percent: failureRatePercent,
+            catalog_item_count: rows.length,
+            catalog_inventory_total: inventoryTotal,
+            waste_queries: wasteQueryCount,
+          },
+        );
       }
 
-      if (Math.random() < 0.1) {
-        errorCounter.add(1, { route: '/inventory' });
-        throw new Error('node inventory lookup failed during catalog processing');
+      if (wasteQueryCount > 0) {
+        log('WARN', 'node inventory bottleneck active', {
+          waste_queries: wasteQueryCount,
+          request_id: req.requestId,
+          item_count: rows.length,
+        });
       }
+
+      log('INFO', 'node inventory served', {
+        request_id: req.requestId,
+        item_count: rows.length,
+        inventory_total: inventoryTotal,
+        waste_queries: wasteQueryCount,
+        redis: true,
+      });
 
       res.json({
         service: serviceName,
@@ -225,5 +258,10 @@ async function induceMysqlBottleneck(rows) {
 }
 
 app.listen(Number(process.env.APP_PORT || '3000'), '0.0.0.0', () => {
-  log('INFO', 'starting node catalog service', { endpoint: otlpEndpoint });
+  log('INFO', 'starting node catalog service', {
+    endpoint: otlpEndpoint,
+    failure_rate_percent: failureRatePercent,
+    slow_log_threshold_ms: slowLogThresholdMs,
+    db_bottleneck_loops: dbBottleneckLoops,
+  });
 });
