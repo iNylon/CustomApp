@@ -228,7 +228,7 @@ public final class App {
     double cpuPercent = processCpuPercent();
     long pid = ProcessHandle.current().pid();
 
-    Attributes.Builder attrs = Attributes.builder()
+    var attrs = Attributes.builder()
         .put(AttributeKey.stringKey("scope"), scope)
         .put(AttributeKey.stringKey("component"), "runtime")
         .put(AttributeKey.longKey("pid"), pid);
