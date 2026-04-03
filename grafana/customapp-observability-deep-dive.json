@@ -226,7 +226,7 @@
         { "refId": "D", "expr": "sum(rate(python_requests_total[$__rate_interval]))", "legendFormat": "Python" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 10,
@@ -241,7 +241,7 @@
         { "refId": "D", "expr": "sum(rate(python_errors_total[$__rate_interval]))", "legendFormat": "Python" }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 11,
@@ -256,7 +256,7 @@
         { "refId": "D", "expr": "histogram_quantile(0.95, sum by (le) (rate(python_request_duration_ms_bucket[$__rate_interval])))", "legendFormat": "Python" }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 12,
@@ -271,7 +271,7 @@
         { "refId": "D", "expr": "sum(rate(python_request_duration_ms_sum[$__rate_interval])) / clamp_min(sum(rate(python_request_duration_ms_count[$__rate_interval])), 1e-9)", "legendFormat": "Python" }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 13,
@@ -285,7 +285,7 @@
         { "refId": "C", "expr": "sum(rate(http_server_duration_count[$__rate_interval]))", "legendFormat": "HTTP req/sec" }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [{ "matcher": { "id": "byName", "options": "HTTP req/sec" }, "properties": [{ "id": "unit", "value": "reqps" }] }] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 14,
@@ -298,7 +298,7 @@
         { "refId": "B", "expr": "sum(rate(otlp_exporter_exported[$__rate_interval]))", "legendFormat": "Exported/sec" }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 15,
@@ -314,7 +314,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 16,
@@ -338,7 +338,7 @@
           }
         ]
       },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 17,
@@ -354,7 +354,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 18,
@@ -370,7 +370,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 19,
@@ -385,7 +385,7 @@
         { "refId": "D", "expr": "sum by (status) (rate(python_requests_total[$__rate_interval]))", "legendFormat": "Python {{status}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 20,
@@ -404,7 +404,7 @@
         { "refId": "H", "expr": "min_over_time(python_request_duration_ms_min[$__rate_interval])", "legendFormat": "Python min" }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 101,
@@ -496,7 +496,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
     },
     {
       "id": 106,
@@ -515,7 +515,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
     },
     {
       "id": 107,
@@ -534,7 +534,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
     },
     {
       "id": 108,
@@ -553,7 +553,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
     },
     {
       "id": 109,
@@ -591,7 +591,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
     },
     {
       "id": 111,
@@ -650,7 +650,8 @@
     {
       "id": 21,
       "type": "timeseries",
-      "title": "Resources · Average CPU % by Service",
+      "title": "Resources · CPU Usage Trend by Service",
+      "description": "Visualizes CPU usage trends per runtime over time.",
       "gridPos": { "x": 0, "y": 92, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
@@ -660,12 +661,13 @@
         { "refId": "D", "expr": "sum(rate(python_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "Python" }
       ],
       "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 22,
       "type": "timeseries",
-      "title": "Resources · Memory RSS / Used by Service",
+      "title": "Resources · Memory Usage Trend by Service",
+      "description": "Visualizes memory usage trends per runtime over time.",
       "gridPos": { "x": 12, "y": 92, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
@@ -675,7 +677,7 @@
         { "refId": "D", "expr": "sum(rate(python_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_memory_rss_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "Python RSS" }
       ],
       "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 23,
@@ -690,7 +692,7 @@
         { "refId": "D", "expr": "sum by (scope) (rate(python_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum by (scope) (rate(python_process_cpu_percent_count[$__rate_interval])), 1e-9)", "legendFormat": "Python {{scope}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 24,
@@ -705,12 +707,13 @@
         { "refId": "D", "expr": "sum(rate(python_process_memory_virtual_mb_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_memory_virtual_mb_count[$__rate_interval])), 1e-9)", "legendFormat": "Python virtual" }
       ],
       "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 114,
       "type": "timeseries",
-      "title": "Logs · Resource Warnings Over Time",
+      "title": "Resources · Detected Resource Anomalies Over Time",
+      "description": "Shows logged resource-threshold anomalies over time by service.",
       "gridPos": { "x": 0, "y": 108, "w": 12, "h": 8 },
       "datasource": { "type": "openobserve", "uid": "${DS_OPENOBSERVE}" },
       "targets": [
@@ -724,12 +727,13 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
     },
     {
       "id": 115,
       "type": "table",
-      "title": "Logs · Latest Resource Snapshots",
+      "title": "Resources · Latest Resource Anomaly Snapshots",
+      "description": "Lists the latest anomaly snapshots with CPU and memory context for audit/demo purposes.",
       "gridPos": { "x": 12, "y": 108, "w": 12, "h": 8 },
       "datasource": { "type": "openobserve", "uid": "${DS_OPENOBSERVE}" },
       "targets": [
@@ -739,10 +743,68 @@
           "organization": "3BTUvLGWaJI6cc5tC2JGlZTW1ea",
           "sqlMode": true,
           "displayMode": "auto",
-          "query": "SELECT _timestamp, service_name, message, context_scope, context_route, context_status, context_pid, context_cpu_percent, context_memory_rss_mb, context_memory_usage_mb, context_memory_used_mb, context_heap_used_mb FROM poc_logs WHERE context_cpu_percent IS NOT NULL OR context_memory_rss_mb IS NOT NULL OR context_memory_used_mb IS NOT NULL ORDER BY _timestamp DESC LIMIT 100"
+          "query": "SELECT _timestamp, service_name, message, context_scope, context_route, context_status, context_pid, context_cpu_percent, context_memory_rss_mb, context_memory_usage_mb, context_memory_used_mb, context_heap_used_mb FROM poc_logs WHERE message LIKE '%resource threshold exceeded%' ORDER BY _timestamp DESC LIMIT 100"
         }
       ],
       "options": { "showHeader": true }
+    },
+    {
+      "id": 116,
+      "type": "timeseries",
+      "title": "Resources · CPU Deviation Above 1h Baseline",
+      "description": "Highlights CPU anomalies by showing how far usage rises above the rolling 1 hour baseline.",
+      "gridPos": { "x": 0, "y": 116, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "clamp_min((sum(rate(java_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(java_process_cpu_percent_count[$__rate_interval])), 1e-9)) - avg_over_time((sum(rate(java_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(java_process_cpu_percent_count[$__rate_interval])), 1e-9))[1h:1m]), 0)", "legendFormat": "Java above baseline" },
+        { "refId": "B", "expr": "clamp_min((sum(rate(node_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(node_process_cpu_percent_count[$__rate_interval])), 1e-9)) - avg_over_time((sum(rate(node_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(node_process_cpu_percent_count[$__rate_interval])), 1e-9))[1h:1m]), 0)", "legendFormat": "Node above baseline" },
+        { "refId": "C", "expr": "clamp_min((sum(rate(php_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(php_process_cpu_percent_count[$__rate_interval])), 1e-9)) - avg_over_time((sum(rate(php_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(php_process_cpu_percent_count[$__rate_interval])), 1e-9))[1h:1m]), 0)", "legendFormat": "PHP above baseline" },
+        { "refId": "D", "expr": "clamp_min((sum(rate(python_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_cpu_percent_count[$__rate_interval])), 1e-9)) - avg_over_time((sum(rate(python_process_cpu_percent_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_cpu_percent_count[$__rate_interval])), 1e-9))[1h:1m]), 0)", "legendFormat": "Python above baseline" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 15 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 117,
+      "type": "timeseries",
+      "title": "Resources · Memory Deviation Above 1h Baseline",
+      "description": "Highlights memory anomalies by showing how far usage rises above the rolling 1 hour baseline.",
+      "gridPos": { "x": 12, "y": 116, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "clamp_min((sum(rate(java_process_memory_used_mb_sum[$__rate_interval])) / clamp_min(sum(rate(java_process_memory_used_mb_count[$__rate_interval])), 1e-9)) - avg_over_time((sum(rate(java_process_memory_used_mb_sum[$__rate_interval])) / clamp_min(sum(rate(java_process_memory_used_mb_count[$__rate_interval])), 1e-9))[1h:1m]), 0)", "legendFormat": "Java above baseline" },
+        { "refId": "B", "expr": "clamp_min((sum(rate(node_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(node_process_memory_rss_mb_count[$__rate_interval])), 1e-9)) - avg_over_time((sum(rate(node_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(node_process_memory_rss_mb_count[$__rate_interval])), 1e-9))[1h:1m]), 0)", "legendFormat": "Node above baseline" },
+        { "refId": "C", "expr": "clamp_min((sum(rate(php_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(php_process_memory_rss_mb_count[$__rate_interval])), 1e-9)) - avg_over_time((sum(rate(php_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(php_process_memory_rss_mb_count[$__rate_interval])), 1e-9))[1h:1m]), 0)", "legendFormat": "PHP above baseline" },
+        { "refId": "D", "expr": "clamp_min((sum(rate(python_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_memory_rss_mb_count[$__rate_interval])), 1e-9)) - avg_over_time((sum(rate(python_process_memory_rss_mb_sum[$__rate_interval])) / clamp_min(sum(rate(python_process_memory_rss_mb_count[$__rate_interval])), 1e-9))[1h:1m]), 0)", "legendFormat": "Python above baseline" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 25 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     }
   ],
   "refresh": "15s",
@@ -769,6 +831,6 @@
   "timezone": "browser",
   "title": "CustomApp - Observability Deep Dive",
   "uid": "customapp-observability-deep-dive",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
