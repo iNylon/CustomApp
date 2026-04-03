@@ -301,6 +301,22 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
       return;
     }
 
+    if ($path === '/api/alert' && $method === 'POST') {
+      $payload = triggerManualAlert($logger, $emitter, $rootSpan);
+      sendJson(200, $payload);
+      finalize($path, 200, $requestStart, $logger, $emitter, $rootSpan, 'Manual alert triggered', [
+        'alert.name' => (string) ($payload['alert_name'] ?? ''),
+        'alert.source' => (string) ($payload['source'] ?? ''),
+        'alert.triggered' => true,
+      ]);
+      finishRootSpan($emitter, $rootSpan, $path, 200, [
+        'alert.name' => (string) ($payload['alert_name'] ?? ''),
+        'alert.source' => (string) ($payload['source'] ?? ''),
+        'alert.triggered' => true,
+      ]);
+      return;
+    }
+
     if ($path === '/api/summary' && $method === 'GET') {
       $payload = buildSummary($path, $logger, $emitter, $rootSpan);
 
@@ -1746,6 +1762,14 @@ function renderIndex(): string
     .fault-button:hover {
       filter: brightness(0.98);
     }
+    .alert-button {
+      background: linear-gradient(135deg, #991b1b, #dc2626);
+      color: #fff;
+      border-color: #b91c1c;
+    }
+    .alert-button:hover {
+      filter: brightness(1.05);
+    }
     .tech-icon {
       flex: 0 0 32px;
       width: 32px;
@@ -1763,6 +1787,7 @@ function renderIndex(): string
     .tech-icon.postgres { background: linear-gradient(135deg, #1d4f91, #4b7ed1); }
     .tech-icon.redis { background: linear-gradient(135deg, #8d0e13, #d82c20); }
     .tech-icon.php { background: linear-gradient(135deg, #5f6fb2, #8892bf); }
+    .tech-icon.alert { background: linear-gradient(135deg, #7f1d1d, #ef4444); }
     .tech-icon.python { background: linear-gradient(135deg, #3673a5, #ffd43b); color: #13233a; }
     .tech-icon.java { background: linear-gradient(135deg, #d66a2a, #f2a348); }
     .tech-icon.nodejs { background: linear-gradient(135deg, #2f7d32, #68a063); }
@@ -1895,6 +1920,7 @@ function renderIndex(): string
             <button class="fault-button" data-fault="python"><span class="tech-icon python">Py</span><span>Trigger Python fout</span></button>
             <button class="fault-button" data-fault="java"><span class="tech-icon java">J</span><span>Trigger Java fout</span></button>
             <button class="fault-button" data-fault="nodejs"><span class="tech-icon nodejs">JS</span><span>Trigger NodeJS fout</span></button>
+            <button class="fault-button alert-button" id="btn-generate-alert"><span class="tech-icon alert">!</span><span>Genereer alert</span></button>
           </div>
         </div>
 
@@ -1936,6 +1962,7 @@ function renderIndex(): string
     const searchInput = document.getElementById('search');
     const categoryInput = document.getElementById('category');
     const faultButtons = [...document.querySelectorAll('button[data-fault]')];
+    const alertButton = document.getElementById('btn-generate-alert');
 
     function euro(value) {
       return Number(value).toFixed(2);
@@ -2159,6 +2186,25 @@ function renderIndex(): string
       }
     }
 
+    async function triggerAlert(button) {
+      const original = button.innerHTML;
+      button.disabled = true;
+      button.innerHTML = `${original}`;
+      try {
+        const { payload } = await requestJson('/api/alert', 'POST');
+        appendLog('alert:triggered', {
+          alert_name: payload.alert_name,
+          source: payload.source,
+          triggered_at: payload.triggered_at,
+        });
+      } catch (error) {
+        appendLog('alert:trigger-failed', { error: error.message });
+      } finally {
+        button.disabled = false;
+        button.innerHTML = original;
+      }
+    }
+
     async function checkoutOrder() {
       if (!currentUser) {
         appendLog('checkout:blocked', { reason: 'not-authenticated' });
@@ -2200,6 +2246,10 @@ function renderIndex(): string
       button.addEventListener('click', () => {
         triggerFault(button.getAttribute('data-fault'), button);
       });
+    });
+
+    alertButton.addEventListener('click', () => {
+      triggerAlert(alertButton);
     });
 
     logoutButton.addEventListener('click', async () => {
@@ -2658,6 +2708,51 @@ function triggerFault(string $target, AppLogger $logger, OtlpHttpEmitter $emitte
     ]),
     default => ['ok' => false, 'target' => $target, 'error' => 'Onbekende fouttrigger.'],
   };
+}
+
+function triggerManualAlert(AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan): array
+{
+  global $requestId;
+
+  $alertName = 'manual_storefront_button';
+  $source = 'storefront_ui';
+  $triggeredAt = gmdate(DATE_ATOM);
+  $span = $emitter->startSpan('php.application.manual_alert', [
+    'component.name' => 'alerting',
+    'component.type' => 'application_logic',
+    'component.layer' => 'application',
+    'request.id' => $requestId,
+    'alert.name' => $alertName,
+    'alert.source' => $source,
+  ], $rootSpan, 1);
+
+  $emitter->exportMetrics([
+    $emitter->counter('php_manual_alerts_total', 1, [
+      'alert_name' => $alertName,
+      'source' => $source,
+    ]),
+  ]);
+
+  $emitter->exportTrace($emitter->finishSpan($span, [
+    'alert.name' => $alertName,
+    'alert.source' => $source,
+    'alert.triggered' => true,
+    'alert.triggered_at' => $triggeredAt,
+  ]));
+
+  $logger->warn('Manual alert trigger fired', [
+    'request_id' => $requestId,
+    'alert_name' => $alertName,
+    'source' => $source,
+    'triggered_at' => $triggeredAt,
+  ]);
+
+  return [
+    'ok' => true,
+    'alert_name' => $alertName,
+    'source' => $source,
+    'triggered_at' => $triggeredAt,
+  ];
 }
 
 function triggerProbeFault(string $name, callable $operation, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan, array $extraAttributes, array $appAttributes = []): array
