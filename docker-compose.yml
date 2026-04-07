@@ -221,12 +221,19 @@ services:
     container_name: poc-rum-browser-runner
     environment:
       TARGET_URL: http://php-storefront:8080
-      BROWSER_CONCURRENCY: "2"
-      SESSION_INTERVAL_MS: "12000"
-      SESSION_DURATION_MS: "5000"
-      RUM_ERROR_EVERY_N: "0"
+      LOCUST_UI_URL: http://load-generator:8089
+      BROWSER_CONCURRENCY: "3"
+      BROWSER_USERS_PER_WORKER: "25"
+      LOCUST_POLL_INTERVAL_MS: "5000"
+      SESSION_INTERVAL_MS: "4000"
+      SESSION_DURATION_MS: "3000"
+      RUM_ERROR_EVERY_N: "2"
+      FAULT_EVERY_N: "2"
+      RUM_LOGIN_EMAIL: dylan@dylan123.nl
+      RUM_LOGIN_PASSWORD: dylan123
     depends_on:
       - php-storefront
+      - load-generator
 
 volumes:
   mysql-data:

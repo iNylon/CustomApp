@@ -80,16 +80,21 @@ Locust gebruikt in deze repo `HttpUser` en genereert daardoor geen echte browser
 Deze service:
 
 - laadt `/` en `/auth` als echte browserpagina's
-- voert UI-interacties uit zoals zoeken, filteren, producten toevoegen en checkout klikken
+- voert UI-interacties uit zoals inloggen, zoeken, filteren, producten toevoegen en meerdere checkouts doen
 - zet een herkenbare synthetic user context via de bestaande browser-RUM integratie
-- kan optioneel periodiek de knop `Genereer RUM error` klikken
+- kan periodiek faults en de knop `Genereer RUM error` triggeren
 
 Belangrijkste compose-instellingen in [docker-compose.yml](/Users/dylan/CustomApp/docker-compose.yml):
 
-- `BROWSER_CONCURRENCY`: aantal parallelle browser workers
+- `LOCUST_UI_URL`: Locust web UI endpoint dat `state` en `user_count` levert
+- `BROWSER_CONCURRENCY`: maximum aantal parallelle browser workers
+- `BROWSER_USERS_PER_WORKER`: hoeveel Locust users ongeveer overeenkomen met 1 browser worker
+- `LOCUST_POLL_INTERVAL_MS`: hoe vaak de browser-runner Locust bevraagt
 - `SESSION_INTERVAL_MS`: wachttijd tussen synthetische sessies per worker
 - `SESSION_DURATION_MS`: extra tijd om RUM events te laten flushen
-- `RUM_ERROR_EVERY_N`: zet op bijvoorbeeld `5` om elke vijfde sessie een browserfout te genereren
+- `RUM_ERROR_EVERY_N`: genereert periodiek browser-errors
+- `FAULT_EVERY_N`: genereert periodiek backend/application faults via de UI
+- `RUM_LOGIN_EMAIL` en `RUM_LOGIN_PASSWORD`: credentials voor de synthetic browser user
 
 In OpenObserve RUM kun je deze sessies herkennen via de synthetic user context:
 
@@ -97,6 +102,7 @@ In OpenObserve RUM kun je deze sessies herkennen via de synthetic user context:
 - naamformaat: `Synthetic Browser <worker>`
 
 Daardoor kun je echte browsergedreven RUM-data bekijken naast de backend-load uit Locust.
+De runner schaalt nu ook terug naar nul als Locust niet actief is of `user_count = 0`, zodat er niet los van Locust browser-sessies blijven binnenkomen.
 
 ## Requirement: bottlenecks visueel inzichtelijk
 
