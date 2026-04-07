@@ -93,6 +93,7 @@ Belangrijkste compose-instellingen in [docker-compose.yml](/Users/dylan/CustomAp
 - `SESSION_INTERVAL_MS`: wachttijd tussen synthetische sessies per worker
 - `SESSION_DURATION_MS`: extra tijd om RUM events te laten flushen
 - `RUM_ERROR_EVERY_N`: genereert browser-errors; standaard staat deze op `1`, dus elke synthetische sessie klikt de RUM error knop
+- `RUM_ERROR_DELAY_MS`: wachttijd binnen de sessie voordat op de RUM error knop wordt geklikt
 - `FAULT_EVERY_N`: genereert periodiek backend/application faults via de UI
 - `RUM_LOGIN_EMAIL` en `RUM_LOGIN_PASSWORD`: credentials voor de synthetic browser user
 

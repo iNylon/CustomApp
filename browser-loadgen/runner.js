@@ -8,6 +8,7 @@ const locustPollIntervalMs = Math.max(1000, Number(process.env.LOCUST_POLL_INTER
 const sessionIntervalMs = Math.max(1000, Number(process.env.SESSION_INTERVAL_MS || '4000'));
 const sessionDurationMs = Math.max(1000, Number(process.env.SESSION_DURATION_MS || '3000'));
 const rumErrorEvery = Math.max(1, Number(process.env.RUM_ERROR_EVERY_N || '1'));
+const rumErrorDelayMs = Math.max(1000, Number(process.env.RUM_ERROR_DELAY_MS || '8000'));
 const faultEvery = Math.max(1, Number(process.env.FAULT_EVERY_N || '2'));
 const loginEmail = (process.env.RUM_LOGIN_EMAIL || 'dylan@dylan123.nl').trim().toLowerCase();
 const loginPassword = process.env.RUM_LOGIN_PASSWORD || 'dylan123';
@@ -159,10 +160,11 @@ async function triggerRumError(page, sequence) {
     return;
   }
 
+  await page.waitForTimeout(rumErrorDelayMs);
   const rumErrorButton = page.locator('#btn-generate-rum-error');
   if (await rumErrorButton.count()) {
     await rumErrorButton.click();
-    await page.waitForTimeout(1200);
+    await page.waitForTimeout(2500);
   }
 }
 
@@ -243,6 +245,7 @@ async function main() {
     session_interval_ms: sessionIntervalMs,
     session_duration_ms: sessionDurationMs,
     rum_error_every_n: rumErrorEvery,
+    rum_error_delay_ms: rumErrorDelayMs,
     fault_every_n: faultEvery,
     login_email: loginEmail,
   });

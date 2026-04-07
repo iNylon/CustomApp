@@ -228,6 +228,7 @@ services:
       SESSION_INTERVAL_MS: "4000"
       SESSION_DURATION_MS: "3000"
       RUM_ERROR_EVERY_N: "1"
+      RUM_ERROR_DELAY_MS: "8000"
       FAULT_EVERY_N: "2"
       RUM_LOGIN_EMAIL: dylan@dylan123.nl
       RUM_LOGIN_PASSWORD: dylan123
