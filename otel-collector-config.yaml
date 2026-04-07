@@ -24,7 +24,39 @@ processors:
     check_interval: 1s
     limit_mib: 512
 
-  batch:
+  # Traces:
+  # - Zet sampling_percentage op 100 voor maximale trace-intensiteit.
+  # - Verlaag naar bijvoorbeeld 25 of 10 om trace-volume centraal terug te brengen.
+  probabilistic_sampler/traces:
+    sampling_percentage: 100
+
+  # Logs:
+  # - Laat deze lijst leeg om alle logs door te laten.
+  # - Voeg regels toe om lagere severities of specifieke services te droppen.
+  filter/logs:
+    error_mode: ignore
+    logs:
+      log_record: []
+
+  # Metrics:
+  # - Gebruik metric-regels om ruisende metrics centraal te droppen.
+  # - Voorbeeld voor lichtere monitoring:
+  #   - 'name == "python_process_cpu_percent"'
+  #   - 'name == "node_process_heap_used_mb"'
+  filter/metrics:
+    error_mode: ignore
+    metrics:
+      metric: []
+
+  batch/traces:
+    send_batch_size: 1024
+    timeout: 2s
+
+  batch/metrics:
+    send_batch_size: 1024
+    timeout: 5s
+
+  batch/logs:
     send_batch_size: 1024
     timeout: 2s
 
@@ -60,6 +92,9 @@ extensions:
   health_check:
 
 service:
+  telemetry:
+    logs:
+      level: info
   extensions:
     - health_check
   pipelines:
@@ -68,8 +103,9 @@ service:
         - otlp
       processors:
         - memory_limiter
+        - probabilistic_sampler/traces
         - resource/common
-        - batch
+        - batch/traces
       exporters:
         - otlphttp/openobserve_traces
 
@@ -78,8 +114,9 @@ service:
         - otlp
       processors:
         - memory_limiter
+        - filter/metrics
         - resource/common
-        - batch
+        - batch/metrics
       exporters:
         - otlphttp/openobserve_metrics
 
@@ -89,7 +126,8 @@ service:
         - filelog
       processors:
         - memory_limiter
+        - filter/logs
         - resource/common
-        - batch
+        - batch/logs
       exporters:
         - otlphttp/openobserve_logs

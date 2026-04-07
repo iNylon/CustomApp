@@ -27,6 +27,25 @@ De collector stuurt signalen naar aparte streams:
 
 Je kunt deze namen aanpassen in [`otel-collector-config.yaml`](/Users/dylan/CustomApp/otel-collector-config.yaml).
 
+## Monitoring-intensiteit centraal regelen
+
+De intensiteit van telemetrie kun je centraal aanpassen in [`otel-collector-config.yaml`](/Users/dylan/CustomApp/otel-collector-config.yaml), zonder de app-services opnieuw te deployen:
+
+- Traces: pas `processors.probabilistic_sampler/traces.sampling_percentage` aan.
+- Logs: voeg regels toe onder `processors.filter/logs.logs.log_record` om logrecords centraal te filteren.
+- Metrics: voeg regels toe onder `processors.filter/metrics.metrics.metric` om ruisende metrics centraal te droppen.
+- Batching: tune `batch/traces`, `batch/logs` en `batch/metrics` per signaaltype.
+- Collector-loglevel: pas `service.telemetry.logs.level` aan.
+
+Voorbeelden:
+
+- Meer trace-detail tijdens incidenten: zet `sampling_percentage: 100`
+- Minder trace-volume in steady state: zet `sampling_percentage: 10`
+- Minder log-volume: filter bijvoorbeeld `INFO`- of `DEBUG`-achtige records centraal
+- Minder metric-volume: drop proces- of resource-metrics die je tijdelijk niet nodig hebt
+
+Let op: in deze repo worden metrics nu via OTLP push verstuurd, niet via scrape. Daardoor regel je metric-intensiteit hier centraal via filters en batching, niet via een scrape interval. Als je specifiek het scrape interval wilt kunnen aanpassen, moeten de services eerst scrape-bare Prometheus metrics exposen en moet de collector of Prometheus die endpoints scrapen.
+
 ## Starten
 
 ```bash
