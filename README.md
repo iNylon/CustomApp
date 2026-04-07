@@ -92,7 +92,7 @@ Belangrijkste compose-instellingen in [docker-compose.yml](/Users/dylan/CustomAp
 - `LOCUST_POLL_INTERVAL_MS`: hoe vaak de browser-runner Locust bevraagt
 - `SESSION_INTERVAL_MS`: wachttijd tussen synthetische sessies per worker
 - `SESSION_DURATION_MS`: extra tijd om RUM events te laten flushen
-- `RUM_ERROR_EVERY_N`: genereert periodiek browser-errors
+- `RUM_ERROR_EVERY_N`: genereert browser-errors; standaard staat deze op `1`, dus elke synthetische sessie klikt de RUM error knop
 - `FAULT_EVERY_N`: genereert periodiek backend/application faults via de UI
 - `RUM_LOGIN_EMAIL` en `RUM_LOGIN_PASSWORD`: credentials voor de synthetic browser user
 
