@@ -1770,6 +1770,14 @@ function renderIndex(): string
     .alert-button:hover {
       filter: brightness(1.05);
     }
+    .rum-error-button {
+      background: linear-gradient(135deg, #7c2d12, #ea580c);
+      color: #fff;
+      border-color: #c2410c;
+    }
+    .rum-error-button:hover {
+      filter: brightness(1.05);
+    }
     .tech-icon {
       flex: 0 0 32px;
       width: 32px;
@@ -1788,6 +1796,7 @@ function renderIndex(): string
     .tech-icon.redis { background: linear-gradient(135deg, #8d0e13, #d82c20); }
     .tech-icon.php { background: linear-gradient(135deg, #5f6fb2, #8892bf); }
     .tech-icon.alert { background: linear-gradient(135deg, #7f1d1d, #ef4444); }
+    .tech-icon.rum { background: linear-gradient(135deg, #9a3412, #fb923c); }
     .tech-icon.python { background: linear-gradient(135deg, #3673a5, #ffd43b); color: #13233a; }
     .tech-icon.java { background: linear-gradient(135deg, #d66a2a, #f2a348); }
     .tech-icon.nodejs { background: linear-gradient(135deg, #2f7d32, #68a063); }
@@ -1921,6 +1930,7 @@ function renderIndex(): string
             <button class="fault-button" data-fault="java"><span class="tech-icon java">J</span><span>Trigger Java fout</span></button>
             <button class="fault-button" data-fault="nodejs"><span class="tech-icon nodejs">JS</span><span>Trigger NodeJS fout</span></button>
             <button class="fault-button alert-button" id="btn-generate-alert"><span class="tech-icon alert">!</span><span>Genereer alert</span></button>
+            <button class="fault-button rum-error-button" id="btn-generate-rum-error"><span class="tech-icon rum">RUM</span><span>Genereer RUM error</span></button>
           </div>
         </div>
 
@@ -1963,6 +1973,7 @@ function renderIndex(): string
     const categoryInput = document.getElementById('category');
     const faultButtons = [...document.querySelectorAll('button[data-fault]')];
     const alertButton = document.getElementById('btn-generate-alert');
+    const rumErrorButton = document.getElementById('btn-generate-rum-error');
 
     function euro(value) {
       return Number(value).toFixed(2);
@@ -2205,6 +2216,28 @@ function renderIndex(): string
       }
     }
 
+    function triggerRumError(button) {
+      const original = button.innerHTML;
+      const rumState = window.__OPENOBSERVE_RUM_STATE__ || {};
+      button.disabled = true;
+      button.innerHTML = `${original}`;
+
+      appendLog('rum:error-triggered', {
+        initialized: Boolean(rumState.initialized),
+        service: rumState.service || '',
+        message: 'Manual RUM test error scheduled',
+      });
+
+      setTimeout(() => {
+        button.disabled = false;
+        button.innerHTML = original;
+
+        const error = new Error('Manual RUM test error from storefront button');
+        error.name = 'ManualRumTestError';
+        throw error;
+      }, 25);
+    }
+
     async function checkoutOrder() {
       if (!currentUser) {
         appendLog('checkout:blocked', { reason: 'not-authenticated' });
@@ -2250,6 +2283,10 @@ function renderIndex(): string
 
     alertButton.addEventListener('click', () => {
       triggerAlert(alertButton);
+    });
+
+    rumErrorButton.addEventListener('click', () => {
+      triggerRumError(rumErrorButton);
     });
 
     logoutButton.addEventListener('click', async () => {
