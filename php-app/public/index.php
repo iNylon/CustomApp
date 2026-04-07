@@ -715,30 +715,32 @@ function queryMysql(bool $forceFailure = false, ?OtlpHttpEmitter $emitter = null
             $operationSequence[] = 'hold_lock';
 
             $categories = ['apparel', 'accessories', 'stationery'];
-            for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
-                $category = $categories[$i % count($categories)];
-                $statement = 'SELECT COUNT(*) FROM products WHERE category = :category';
-                $operationName = 'SELECT';
-                $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.mysql.category_count', [
-                    'component.layer' => 'infrastructure',
-                    'infra.kind' => 'database',
-                    'db.system' => 'mysql',
-                    'db.operation' => 'SELECT',
-                    'db.query_type' => 'select_count',
-                    'db.sql.table' => 'products',
-                    'db.category' => $category,
-                    'server.address' => 'mysql',
-                    'server.port' => 3306,
-                    'bottleneck.active' => true,
-                ], fn () => $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = :category'));
-                $stmt->execute(['category' => $category]);
-                $stmt->fetchColumn();
-                $rowsReturned = 1;
-                $stmt->closeCursor();
-                $wasteQueries++;
-                $lastQueryType = 'select_count';
-                $operationSequence[] = 'count_by_category:' . $category;
-            }
+            traceDatabaseStep($emitter, $parentSpan, 'php.mysql.category_count_loop', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'database',
+                'db.system' => 'mysql',
+                'db.operation' => 'SELECT',
+                'db.query_type' => 'select_count',
+                'db.sql.table' => 'products',
+                'db.operation_count' => getDbBottleneckLoops(),
+                'server.address' => 'mysql',
+                'server.port' => 3306,
+                'bottleneck.active' => true,
+            ], function () use ($pdo, $categories, $emitter, $parentSpan, &$statement, &$operationName, &$rowsReturned, &$wasteQueries, &$lastQueryType, &$operationSequence): void {
+                for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
+                    $category = $categories[$i % count($categories)];
+                    $statement = 'SELECT COUNT(*) FROM products WHERE category = :category';
+                    $operationName = 'SELECT';
+                    $stmt = $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = :category');
+                    $stmt->execute(['category' => $category]);
+                    $stmt->fetchColumn();
+                    $rowsReturned = 1;
+                    $stmt->closeCursor();
+                    $wasteQueries++;
+                    $lastQueryType = 'select_count';
+                    $operationSequence[] = 'count_by_category:' . $category;
+                }
+            });
 
             if ($forceFailure || random_int(1, 100) <= 14) {
                 $durationMs = round((microtime(true) - $queryStart) * 1000, 2);
@@ -939,31 +941,33 @@ function queryPostgres(bool $forceFailure = false, ?OtlpHttpEmitter $emitter = n
             $lastQueryType = 'sleep';
             $operationSequence[] = 'hold_lock';
 
-            for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
-                $userId = ($i % 3) + 1;
-                $statement = 'SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id';
-                $table = 'recommendations';
-                $operationName = 'SELECT';
-                $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.postgres.recommendation_count', [
-                    'component.layer' => 'infrastructure',
-                    'infra.kind' => 'database',
-                    'db.system' => 'postgresql',
-                    'db.operation' => 'SELECT',
-                    'db.query_type' => 'select_count',
-                    'db.sql.table' => 'recommendations',
-                    'user.id' => $userId,
-                    'server.address' => 'postgres',
-                    'server.port' => 5432,
-                    'bottleneck.active' => true,
-                ], fn () => $pdo->prepare('SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id'));
-                $stmt->execute(['user_id' => $userId]);
-                $stmt->fetchColumn();
-                $rowsReturned = 1;
-                $stmt->closeCursor();
-                $wasteQueries++;
-                $lastQueryType = 'select_count';
-                $operationSequence[] = 'count_recommendations:' . $userId;
-            }
+            traceDatabaseStep($emitter, $parentSpan, 'php.postgres.recommendation_count_loop', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'database',
+                'db.system' => 'postgresql',
+                'db.operation' => 'SELECT',
+                'db.query_type' => 'select_count',
+                'db.sql.table' => 'recommendations',
+                'db.operation_count' => getDbBottleneckLoops(),
+                'server.address' => 'postgres',
+                'server.port' => 5432,
+                'bottleneck.active' => true,
+            ], function () use ($pdo, &$statement, &$table, &$operationName, &$rowsReturned, &$wasteQueries, &$lastQueryType, &$operationSequence): void {
+                for ($i = 0; $i < getDbBottleneckLoops(); $i++) {
+                    $userId = ($i % 3) + 1;
+                    $statement = 'SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id';
+                    $table = 'recommendations';
+                    $operationName = 'SELECT';
+                    $stmt = $pdo->prepare('SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id');
+                    $stmt->execute(['user_id' => $userId]);
+                    $stmt->fetchColumn();
+                    $rowsReturned = 1;
+                    $stmt->closeCursor();
+                    $wasteQueries++;
+                    $lastQueryType = 'select_count';
+                    $operationSequence[] = 'count_recommendations:' . $userId;
+                }
+            });
 
             if ($forceFailure || random_int(1, 100) <= 14) {
                 $durationMs = round((microtime(true) - $queryStart) * 1000, 2);
@@ -1125,77 +1129,38 @@ function queryRedis(bool $forceFailure = false, ?OtlpHttpEmitter $emitter = null
     $hotKey = 'redis:hotspot:counter';
 
     if (isDbBottleneckModeEnabled()) {
-        for ($i = 0; $i < $loops; $i++) {
-            $tx = false;
-            traceDatabaseStep($emitter, $parentSpan, 'php.redis.watch', [
-                'component.layer' => 'infrastructure',
-                'infra.kind' => 'cache',
-                'db.system' => 'redis',
-                'db.operation' => 'WATCH',
-                'db.redis.key' => $hotKey,
-                'server.address' => 'redis',
-                'server.port' => 6379,
-                'bottleneck.active' => true,
-            ], fn () => $redis->watch($hotKey));
-            $current = (int) (traceDatabaseStep($emitter, $parentSpan, 'php.redis.get_hot_key', [
-                'component.layer' => 'infrastructure',
-                'infra.kind' => 'cache',
-                'db.system' => 'redis',
-                'db.operation' => 'GET',
-                'db.redis.key' => $hotKey,
-                'server.address' => 'redis',
-                'server.port' => 6379,
-                'bottleneck.active' => true,
-            ], fn () => $redis->get($hotKey)) ?: 0);
-            traceDatabaseStep($emitter, $parentSpan, 'php.redis.lock_wait', [
-                'component.layer' => 'infrastructure',
-                'infra.kind' => 'cache',
-                'db.system' => 'redis',
-                'db.operation' => 'WAIT',
-                'db.redis.key' => $hotKey,
-                'server.address' => 'redis',
-                'server.port' => 6379,
-                'bottleneck.active' => true,
-            ], function (): void {
+        traceDatabaseStep($emitter, $parentSpan, 'php.redis.contention_loop', [
+            'component.layer' => 'infrastructure',
+            'infra.kind' => 'cache',
+            'db.system' => 'redis',
+            'db.operation' => 'WATCH_MULTI_EXEC',
+            'db.redis.key' => $hotKey,
+            'db.operation_count' => $loops,
+            'server.address' => 'redis',
+            'server.port' => 6379,
+            'bottleneck.active' => true,
+        ], function () use ($loops, $redis, $hotKey, &$retryConflicts, &$wasteOps): void {
+            for ($i = 0; $i < $loops; $i++) {
+                $tx = false;
+                $redis->watch($hotKey);
+                $current = (int) ($redis->get($hotKey) ?: 0);
                 usleep(40000);
-            });
 
-            traceDatabaseStep($emitter, $parentSpan, 'php.redis.multi_exec', [
-                'component.layer' => 'infrastructure',
-                'infra.kind' => 'cache',
-                'db.system' => 'redis',
-                'db.operation' => 'MULTI',
-                'db.redis.key' => $hotKey,
-                'server.address' => 'redis',
-                'server.port' => 6379,
-                'bottleneck.active' => true,
-            ], function () use ($redis, $hotKey, $current, &$tx): void {
                 $redis->multi();
                 $redis->set($hotKey, (string) ($current + 1));
                 $redis->expire($hotKey, 120);
                 $tx = $redis->exec();
-            });
 
-            if ($tx === false) {
-                $retryConflicts++;
-                continue;
-            }
+                if ($tx === false) {
+                    $retryConflicts++;
+                    continue;
+                }
 
-            traceDatabaseStep($emitter, $parentSpan, 'php.redis.readback', [
-                'component.layer' => 'infrastructure',
-                'infra.kind' => 'cache',
-                'db.system' => 'redis',
-                'db.operation' => 'GET',
-                'db.redis.key' => $hotKey,
-                'server.address' => 'redis',
-                'server.port' => 6379,
-                'bottleneck.active' => true,
-            ], function () use ($redis, $hotKey): void {
                 $redis->get($hotKey);
                 $redis->pttl($hotKey);
-            });
-            $wasteOps += 4;
-        }
+                $wasteOps += 4;
+            }
+        });
     }
 
     if ($forceFailure || (isDbBottleneckModeEnabled() && $retryConflicts >= max(2, (int) floor($loops * 0.25)))) {

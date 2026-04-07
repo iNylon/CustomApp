@@ -362,24 +362,26 @@ async function induceMysqlBottleneck(rows) {
     totalQueries += 2;
 
     const loopCount = Math.max(dbBottleneckLoops, products.length);
-    for (let i = 0; i < loopCount; i += 1) {
-      const sku = products[i % products.length].sku;
-      await traceStep('node.mysql.product_lookup', {
-        'component.layer': 'infrastructure',
-        'infra.kind': 'database',
-        'db.system': 'mysql',
-        'db.operation': 'SELECT',
-        'db.query_type': 'select_inventory',
-        'db.sql.table': 'products',
-        'db.product.sku': sku,
-        'server.address': process.env.MYSQL_HOST || 'mysql',
-        'server.port': Number(process.env.MYSQL_PORT || '3306'),
-        'bottleneck.active': true,
-      }, () => connection.query('SELECT inventory, price FROM products WHERE sku = ?', [sku]));
-      lastQueryType = 'select_inventory';
-      operationSequence.push(`read_product:${sku}`);
-      totalQueries += 1;
-    }
+    await traceStep('node.mysql.product_lookup_loop', {
+      'component.layer': 'infrastructure',
+      'infra.kind': 'database',
+      'db.system': 'mysql',
+      'db.operation': 'SELECT',
+      'db.query_type': 'select_inventory',
+      'db.sql.table': 'products',
+      'db.operation_count': loopCount,
+      'server.address': process.env.MYSQL_HOST || 'mysql',
+      'server.port': Number(process.env.MYSQL_PORT || '3306'),
+      'bottleneck.active': true,
+    }, async () => {
+      for (let i = 0; i < loopCount; i += 1) {
+        const sku = products[i % products.length].sku;
+        await connection.query('SELECT inventory, price FROM products WHERE sku = ?', [sku]);
+        lastQueryType = 'select_inventory';
+        operationSequence.push(`read_product:${sku}`);
+        totalQueries += 1;
+      }
+    });
 
     await connection.commit();
     return totalQueries;

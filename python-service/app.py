@@ -671,26 +671,32 @@ def recommendations():
                     last_query_type = "sleep"
                     waste_queries += 2
 
-                    for _ in range(DB_BOTTLENECK_LOOPS):
-                        trace_step(
-                            "python.postgres.recommendation_count",
-                            {
-                                "component.layer": "infrastructure",
-                                "infra.kind": "database",
-                                "db.system": "postgresql",
-                                "db.operation": "SELECT",
-                                "db.query_type": "select_count",
-                                "db.sql.table": "recommendations",
-                                "user.id": user_id,
-                                "server.address": os.getenv("POSTGRES_HOST", "postgres"),
-                                "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
-                                "bottleneck.active": True,
-                            },
-                            lambda: (cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,)), cur.fetchone()),
-                        )
-                        operation_sequence.append("count_recommendations")
-                        last_query_type = "select_count"
-                        waste_queries += 1
+                    def run_recommendation_count_loop():
+                        nonlocal waste_queries, last_query_type
+                        for _ in range(DB_BOTTLENECK_LOOPS):
+                            cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,))
+                            cur.fetchone()
+                            operation_sequence.append("count_recommendations")
+                            last_query_type = "select_count"
+                            waste_queries += 1
+
+                    trace_step(
+                        "python.postgres.recommendation_count_loop",
+                        {
+                            "component.layer": "infrastructure",
+                            "infra.kind": "database",
+                            "db.system": "postgresql",
+                            "db.operation": "SELECT",
+                            "db.query_type": "select_count",
+                            "db.sql.table": "recommendations",
+                            "user.id": user_id,
+                            "db.operation_count": DB_BOTTLENECK_LOOPS,
+                            "server.address": os.getenv("POSTGRES_HOST", "postgres"),
+                            "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
+                            "bottleneck.active": True,
+                        },
+                        run_recommendation_count_loop,
+                    )
 
                 trace_step(
                     "python.postgres.recommendation_query",
@@ -719,33 +725,41 @@ def recommendations():
                 )
                 rows = cur.fetchall()
 
-                items = []
-                for row in rows:
-                    if DB_BOTTLENECK_MODE:
-                        tier_row = trace_step(
-                            "python.postgres.user_tier_lookup",
-                            {
-                                "component.layer": "infrastructure",
-                                "infra.kind": "database",
-                                "db.system": "postgresql",
-                                "db.operation": "SELECT",
-                                "db.query_type": "select_tier",
-                                "db.sql.table": "users",
-                                "user.id": user_id,
-                                "server.address": os.getenv("POSTGRES_HOST", "postgres"),
-                                "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
-                                "bottleneck.active": True,
-                            },
-                            lambda: (cur.execute("SELECT tier FROM users WHERE id = %s", (user_id,)), cur.fetchone())[1],
-                        )
-                        operation_sequence.append("fetch_user_tier")
-                        last_query_type = "select_tier"
-                        waste_queries += 1
-                        tier = tier_row[0] if tier_row else row[1]
-                    else:
-                        tier = row[1]
+                tier_rows = [row[1] for row in rows]
+                if DB_BOTTLENECK_MODE and rows:
+                    def run_user_tier_lookup_loop():
+                        nonlocal waste_queries, last_query_type, tier_rows
+                        looked_up = []
+                        for _index, _row in enumerate(rows):
+                            cur.execute("SELECT tier FROM users WHERE id = %s", (user_id,))
+                            tier_row = cur.fetchone()
+                            looked_up.append(tier_row[0] if tier_row else _row[1])
+                            operation_sequence.append("fetch_user_tier")
+                            last_query_type = "select_tier"
+                            waste_queries += 1
+                        tier_rows = looked_up
 
-                    items.append({"email": row[0], "tier": tier, "sku": row[2], "score": float(row[3])})
+                    trace_step(
+                        "python.postgres.user_tier_lookup_loop",
+                        {
+                            "component.layer": "infrastructure",
+                            "infra.kind": "database",
+                            "db.system": "postgresql",
+                            "db.operation": "SELECT",
+                            "db.query_type": "select_tier",
+                            "db.sql.table": "users",
+                            "user.id": user_id,
+                            "db.operation_count": len(rows),
+                            "server.address": os.getenv("POSTGRES_HOST", "postgres"),
+                            "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
+                            "bottleneck.active": True,
+                        },
+                        run_user_tier_lookup_loop,
+                    )
+
+                items = []
+                for index, row in enumerate(rows):
+                    items.append({"email": row[0], "tier": tier_rows[index], "sku": row[2], "score": float(row[3])})
 
             payload = {
                 "service": SERVICE_NAME,
