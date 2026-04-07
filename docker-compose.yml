@@ -215,6 +215,19 @@ services:
     depends_on:
       - php-storefront
 
+  rum-browser-runner:
+    build:
+      context: ./browser-loadgen
+    container_name: poc-rum-browser-runner
+    environment:
+      TARGET_URL: http://php-storefront:8080
+      BROWSER_CONCURRENCY: "2"
+      SESSION_INTERVAL_MS: "12000"
+      SESSION_DURATION_MS: "5000"
+      RUM_ERROR_EVERY_N: "0"
+    depends_on:
+      - php-storefront
+
 volumes:
   mysql-data:
   postgres-data:

@@ -69,6 +69,34 @@ Beschikbare endpoints:
 - Alle runtimes sturen nu ook CPU- en geheugengebruik uit, inclusief process/service-context en threshold-logs voor resource-afwijkingen.
 - Alle services schrijven structured logs naar `/var/telemetry-logs/*.log`, die door de collector worden ingelezen.
 - Een Grafana-dashboard voor deze opzet staat in [`grafana/customapp-observability-deep-dive.json`](/Users/dylan/CustomApp/grafana/customapp-observability-deep-dive.json).
+- Naast `load-generator` draait ook `rum-browser-runner`, een echte headless browser die synthetische storefront-sessies opbouwt zodat OpenObserve RUM sessies, interacties en browser-errors kan registreren.
+
+## Synthetische RUM-sessies
+
+Locust gebruikt in deze repo `HttpUser` en genereert daardoor geen echte browser-RUM sessies. Daarom is er een aparte service toegevoegd:
+
+- `rum-browser-runner`: een Playwright-gebaseerde synthetic browser runner
+
+Deze service:
+
+- laadt `/` en `/auth` als echte browserpagina's
+- voert UI-interacties uit zoals zoeken, filteren, producten toevoegen en checkout klikken
+- zet een herkenbare synthetic user context via de bestaande browser-RUM integratie
+- kan optioneel periodiek de knop `Genereer RUM error` klikken
+
+Belangrijkste compose-instellingen in [docker-compose.yml](/Users/dylan/CustomApp/docker-compose.yml):
+
+- `BROWSER_CONCURRENCY`: aantal parallelle browser workers
+- `SESSION_INTERVAL_MS`: wachttijd tussen synthetische sessies per worker
+- `SESSION_DURATION_MS`: extra tijd om RUM events te laten flushen
+- `RUM_ERROR_EVERY_N`: zet op bijvoorbeeld `5` om elke vijfde sessie een browserfout te genereren
+
+In OpenObserve RUM kun je deze sessies herkennen via de synthetic user context:
+
+- e-mailformaat: `synthetic-rum+<session>@example.local`
+- naamformaat: `Synthetic Browser <worker>`
+
+Daardoor kun je echte browsergedreven RUM-data bekijken naast de backend-load uit Locust.
 
 ## Requirement: bottlenecks visueel inzichtelijk
 
