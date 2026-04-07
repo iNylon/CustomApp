@@ -1,0 +1,9 @@
+{
+  "name": "browser-loadgen",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Synthetic browser sessions for OpenObserve RUM",
+  "dependencies": {
+    "playwright": "1.52.0"
+  }
+}
