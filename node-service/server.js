@@ -107,6 +107,22 @@ function generateRequestId() {
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+async function traceStep(name, attributes, operation) {
+  return tracer.startActiveSpan(name, async (span) => {
+    Object.entries(attributes || {}).forEach(([key, value]) => span.setAttribute(key, value));
+    try {
+      const result = await operation(span);
+      span.end();
+      return result;
+    } catch (error) {
+      applyErrorAttributes(span, error);
+      span.setStatus({ code: 2, message: error.message });
+      span.end();
+      throw error;
+    }
+  });
+}
+
 function log(severity, message, context = {}) {
   const activeSpan = trace.getActiveSpan();
   const spanContext = activeSpan ? activeSpan.spanContext() : undefined;
@@ -203,10 +219,29 @@ app.get('/inventory', async (req, res) => {
   return tracer.startActiveSpan('node.inventory', async (span) => {
     try {
       span.setAttribute('request.id', req.requestId);
-      const [rows] = await mysqlPool.query('SELECT sku, name, category, price, inventory FROM products ORDER BY id LIMIT 25');
+      span.setAttribute('peer.service', 'mysql');
+      const [rows] = await traceStep('node.mysql.inventory_query', {
+        'component.layer': 'infrastructure',
+        'infra.kind': 'database',
+        'db.system': 'mysql',
+        'db.operation': 'SELECT',
+        'db.sql.table': 'products',
+        'server.address': process.env.MYSQL_HOST || 'mysql',
+        'server.port': Number(process.env.MYSQL_PORT || '3306'),
+        'bottleneck.active': dbBottleneckMode,
+      }, () => mysqlPool.query('SELECT sku, name, category, price, inventory FROM products ORDER BY id LIMIT 25'));
       const wasteQueryCount = dbBottleneckMode ? await induceMysqlBottleneck(rows) : 0;
       const inventoryTotal = rows.reduce((total, row) => total + Number(row.inventory || 0), 0);
-      await redis.set('node:last_inventory_fetch', new Date().toISOString());
+      await traceStep('node.redis.marker_set', {
+        'component.layer': 'infrastructure',
+        'infra.kind': 'cache',
+        'db.system': 'redis',
+        'db.operation': 'SET',
+        'db.redis.key': 'node:last_inventory_fetch',
+        'server.address': process.env.REDIS_HOST || 'redis',
+        'server.port': Number(process.env.REDIS_PORT || '6379'),
+        'bottleneck.active': false,
+      }, () => redis.set('node:last_inventory_fetch', new Date().toISOString()));
       const forceFailure = req.query.fail === '1';
       const syntheticFailure = Math.random() * 100 < failureRatePercent;
 
@@ -244,7 +279,16 @@ app.get('/inventory', async (req, res) => {
         request_id: req.requestId,
         items: rows,
         waste_queries: wasteQueryCount,
-        redis_marker: await redis.get('node:last_inventory_fetch'),
+        redis_marker: await traceStep('node.redis.marker_get', {
+          'component.layer': 'infrastructure',
+          'infra.kind': 'cache',
+          'db.system': 'redis',
+          'db.operation': 'GET',
+          'db.redis.key': 'node:last_inventory_fetch',
+          'server.address': process.env.REDIS_HOST || 'redis',
+          'server.port': Number(process.env.REDIS_PORT || '6379'),
+          'bottleneck.active': false,
+        }, () => redis.get('node:last_inventory_fetch')),
       });
       span.setAttribute('catalog.item_count', rows.length);
       span.setAttribute('catalog.waste_queries', wasteQueryCount);
@@ -271,7 +315,15 @@ app.get('/inventory', async (req, res) => {
 });
 
 async function induceMysqlBottleneck(rows) {
-  const connection = await mysqlPool.getConnection();
+  const connection = await traceStep('node.mysql.connect', {
+    'component.layer': 'infrastructure',
+    'infra.kind': 'database',
+    'db.system': 'mysql',
+    'db.operation': 'CONNECT',
+    'server.address': process.env.MYSQL_HOST || 'mysql',
+    'server.port': Number(process.env.MYSQL_PORT || '3306'),
+    'bottleneck.active': true,
+  }, () => mysqlPool.getConnection());
   const products = rows.length > 0 ? rows : [{ sku: 'SKU-100' }];
   let totalQueries = 0;
   const transactionId = `node-mysql-${Date.now().toString(36)}`;
@@ -281,10 +333,30 @@ async function induceMysqlBottleneck(rows) {
   try {
     await connection.beginTransaction();
     operationSequence.push('begin_transaction');
-    await connection.query('SELECT id FROM products WHERE id = 1 FOR UPDATE');
+    await traceStep('node.mysql.select_for_update', {
+      'component.layer': 'infrastructure',
+      'infra.kind': 'database',
+      'db.system': 'mysql',
+      'db.operation': 'SELECT',
+      'db.query_type': 'select_for_update',
+      'db.sql.table': 'products',
+      'server.address': process.env.MYSQL_HOST || 'mysql',
+      'server.port': Number(process.env.MYSQL_PORT || '3306'),
+      'bottleneck.active': true,
+    }, () => connection.query('SELECT id FROM products WHERE id = 1 FOR UPDATE'));
     lastQueryType = 'select_for_update';
     operationSequence.push('lock_product_row');
-    await connection.query('SELECT SLEEP(0.12)');
+    await traceStep('node.mysql.lock_wait', {
+      'component.layer': 'infrastructure',
+      'infra.kind': 'database',
+      'db.system': 'mysql',
+      'db.operation': 'SELECT',
+      'db.query_type': 'sleep',
+      'db.sql.table': 'products',
+      'server.address': process.env.MYSQL_HOST || 'mysql',
+      'server.port': Number(process.env.MYSQL_PORT || '3306'),
+      'bottleneck.active': true,
+    }, () => connection.query('SELECT SLEEP(0.12)'));
     lastQueryType = 'sleep';
     operationSequence.push('hold_lock');
     totalQueries += 2;
@@ -292,7 +364,18 @@ async function induceMysqlBottleneck(rows) {
     const loopCount = Math.max(dbBottleneckLoops, products.length);
     for (let i = 0; i < loopCount; i += 1) {
       const sku = products[i % products.length].sku;
-      await connection.query('SELECT inventory, price FROM products WHERE sku = ?', [sku]);
+      await traceStep('node.mysql.product_lookup', {
+        'component.layer': 'infrastructure',
+        'infra.kind': 'database',
+        'db.system': 'mysql',
+        'db.operation': 'SELECT',
+        'db.query_type': 'select_inventory',
+        'db.sql.table': 'products',
+        'db.product.sku': sku,
+        'server.address': process.env.MYSQL_HOST || 'mysql',
+        'server.port': Number(process.env.MYSQL_PORT || '3306'),
+        'bottleneck.active': true,
+      }, () => connection.query('SELECT inventory, price FROM products WHERE sku = ?', [sku]));
       lastQueryType = 'select_inventory';
       operationSequence.push(`read_product:${sku}`);
       totalQueries += 1;

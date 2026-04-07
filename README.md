@@ -70,6 +70,30 @@ Beschikbare endpoints:
 - Alle services schrijven structured logs naar `/var/telemetry-logs/*.log`, die door de collector worden ingelezen.
 - Een Grafana-dashboard voor deze opzet staat in [`grafana/customapp-observability-deep-dive.json`](/Users/dylan/CustomApp/grafana/customapp-observability-deep-dive.json).
 
+## Requirement: bottlenecks visueel inzichtelijk
+
+Deze applicatie dekt de requirement "De APM-oplossing moet bottlenecks binnen requests of transacties visueel inzichtelijk maken" op de volgende manier:
+
+- Elke request of transactie wordt als een trace met root span en child spans vastgelegd.
+- Trage infrastructuurstappen worden als aparte child spans geregistreerd, zoals database-connecties, lock waits, query-loops, cache reads en cache writes.
+- Bottleneck-spans krijgen expliciete attributen zoals `component.layer`, `infra.kind`, `db.system`, `db.operation`, `server.address`, `server.port` en `bottleneck.active`.
+- Request- en componentduur worden ook als metrics vastgelegd, zodat latencypieken zowel in dashboards als in trace-waterfalls zichtbaar zijn.
+- Logs bevatten `trace_id` en `span_id`, zodat je vanuit een trage span direct de gerelateerde logs kunt openen.
+
+Daardoor kun je in OpenObserve of een andere APM-oplossing visueel zien:
+
+- hoe een request uiteenvalt in een waterfall of trace tree
+- welke stap het meeste tijd kost
+- of de bottleneck in applicatielogica, MySQL, PostgreSQL of Redis zit
+- welke bottlenecks synthetisch geactiveerd zijn via `bottleneck.active=true`
+
+Voorbeelden in de code:
+
+- PHP storefront child spans voor MySQL, PostgreSQL en Redis in [index.php](/Users/dylan/CustomApp/php-app/public/index.php)
+- Node catalog child spans voor MySQL-queries en Redis-markers in [server.js](/Users/dylan/CustomApp/node-service/server.js)
+- Python recommendation child spans voor PostgreSQL-queries en Redis-cacheacties in [app.py](/Users/dylan/CustomApp/python-service/app.py)
+- Java checkout child spans voor Redis-acties in [App.java](/Users/dylan/CustomApp/java-service/src/main/java/nl/dylan/openobserve/App.java)
+
 ## RUM later inschakelen
 
 De PHP-frontend bevat al een RUM-ready config endpoint. Zet later in `docker-compose.yml` bijvoorbeeld:

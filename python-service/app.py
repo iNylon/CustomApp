@@ -116,6 +116,18 @@ def get_redis():
     )
 
 
+def trace_step(name: str, attributes: dict, operation):
+    with tracer.start_as_current_span(name, kind=SpanKind.INTERNAL) as span:
+        for key, value in attributes.items():
+            span.set_attribute(key, value)
+        try:
+            return operation()
+        except Exception as error:
+            apply_error_attributes(span, error)
+            span.set_status(Status(StatusCode.ERROR, str(error)))
+            raise
+
+
 def attach_error_context(error: Exception, **context):
     existing = getattr(error, "observability_context", {})
     setattr(error, "observability_context", {**existing, **context})
@@ -584,52 +596,148 @@ def recommendations():
         try:
             cache = get_redis()
             cache_key = f"recommendations:{user_id}"
-            cached = cache.get(cache_key)
+            cached = trace_step(
+                "python.redis.cache_get",
+                {
+                    "component.layer": "infrastructure",
+                    "infra.kind": "cache",
+                    "db.system": "redis",
+                    "db.operation": "GET",
+                    "db.redis.key": cache_key,
+                    "server.address": os.getenv("REDIS_HOST", "redis"),
+                    "server.port": int(os.getenv("REDIS_PORT", "6379")),
+                    "bottleneck.active": False,
+                },
+                lambda: cache.get(cache_key),
+            )
             if cached and not DB_BOTTLENECK_MODE:
                 payload = json.loads(cached)
                 payload["request_id"] = request._request_id
                 log("INFO", "served recommendations from cache", user_id=user_id, request_id=request._request_id)
                 return jsonify(payload)
 
-            with get_pg_connection() as conn, conn.cursor() as cur:
+            with trace_step(
+                "python.postgres.connect",
+                {
+                    "component.layer": "infrastructure",
+                    "infra.kind": "database",
+                    "db.system": "postgresql",
+                    "db.operation": "CONNECT",
+                    "server.address": os.getenv("POSTGRES_HOST", "postgres"),
+                    "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
+                    "bottleneck.active": DB_BOTTLENECK_MODE,
+                },
+                get_pg_connection,
+            ) as conn, conn.cursor() as cur:
                 waste_queries = 0
                 transaction_id = f"python-pg-{uuid.uuid4().hex[:10]}"
                 operation_sequence = []
                 last_query_type = "read"
 
                 if DB_BOTTLENECK_MODE:
-                    cur.execute("SELECT id FROM users WHERE id = 1 FOR UPDATE")
+                    trace_step(
+                        "python.postgres.select_for_update",
+                        {
+                            "component.layer": "infrastructure",
+                            "infra.kind": "database",
+                            "db.system": "postgresql",
+                            "db.operation": "SELECT",
+                            "db.query_type": "select_for_update",
+                            "db.sql.table": "users",
+                            "server.address": os.getenv("POSTGRES_HOST", "postgres"),
+                            "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
+                            "bottleneck.active": True,
+                        },
+                        lambda: cur.execute("SELECT id FROM users WHERE id = 1 FOR UPDATE"),
+                    )
                     operation_sequence.append("lock_user_row")
                     last_query_type = "select_for_update"
-                    cur.execute("SELECT pg_sleep(0.15)")
+                    trace_step(
+                        "python.postgres.lock_wait",
+                        {
+                            "component.layer": "infrastructure",
+                            "infra.kind": "database",
+                            "db.system": "postgresql",
+                            "db.operation": "SELECT",
+                            "db.query_type": "sleep",
+                            "db.sql.table": "users",
+                            "server.address": os.getenv("POSTGRES_HOST", "postgres"),
+                            "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
+                            "bottleneck.active": True,
+                        },
+                        lambda: cur.execute("SELECT pg_sleep(0.15)"),
+                    )
                     operation_sequence.append("hold_lock")
                     last_query_type = "sleep"
                     waste_queries += 2
 
                     for _ in range(DB_BOTTLENECK_LOOPS):
-                        cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,))
-                        cur.fetchone()
+                        trace_step(
+                            "python.postgres.recommendation_count",
+                            {
+                                "component.layer": "infrastructure",
+                                "infra.kind": "database",
+                                "db.system": "postgresql",
+                                "db.operation": "SELECT",
+                                "db.query_type": "select_count",
+                                "db.sql.table": "recommendations",
+                                "user.id": user_id,
+                                "server.address": os.getenv("POSTGRES_HOST", "postgres"),
+                                "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
+                                "bottleneck.active": True,
+                            },
+                            lambda: (cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,)), cur.fetchone()),
+                        )
                         operation_sequence.append("count_recommendations")
                         last_query_type = "select_count"
                         waste_queries += 1
 
-                cur.execute(
-                    """
-                    SELECT u.email, u.tier, r.sku, r.score
-                    FROM users u
-                    JOIN recommendations r ON r.user_id = u.id
-                    WHERE u.id = %s
-                    ORDER BY r.score DESC
-                    """,
-                    (user_id,),
+                trace_step(
+                    "python.postgres.recommendation_query",
+                    {
+                        "component.layer": "infrastructure",
+                        "infra.kind": "database",
+                        "db.system": "postgresql",
+                        "db.operation": "SELECT",
+                        "db.query_type": "join_recommendations",
+                        "db.sql.table": "users,recommendations",
+                        "user.id": user_id,
+                        "server.address": os.getenv("POSTGRES_HOST", "postgres"),
+                        "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
+                        "bottleneck.active": DB_BOTTLENECK_MODE,
+                    },
+                    lambda: cur.execute(
+                        """
+                        SELECT u.email, u.tier, r.sku, r.score
+                        FROM users u
+                        JOIN recommendations r ON r.user_id = u.id
+                        WHERE u.id = %s
+                        ORDER BY r.score DESC
+                        """,
+                        (user_id,),
+                    ),
                 )
                 rows = cur.fetchall()
 
                 items = []
                 for row in rows:
                     if DB_BOTTLENECK_MODE:
-                        cur.execute("SELECT tier FROM users WHERE id = %s", (user_id,))
-                        tier_row = cur.fetchone()
+                        tier_row = trace_step(
+                            "python.postgres.user_tier_lookup",
+                            {
+                                "component.layer": "infrastructure",
+                                "infra.kind": "database",
+                                "db.system": "postgresql",
+                                "db.operation": "SELECT",
+                                "db.query_type": "select_tier",
+                                "db.sql.table": "users",
+                                "user.id": user_id,
+                                "server.address": os.getenv("POSTGRES_HOST", "postgres"),
+                                "server.port": int(os.getenv("POSTGRES_PORT", "5432")),
+                                "bottleneck.active": True,
+                            },
+                            lambda: (cur.execute("SELECT tier FROM users WHERE id = %s", (user_id,)), cur.fetchone())[1],
+                        )
                         operation_sequence.append("fetch_user_tier")
                         last_query_type = "select_tier"
                         waste_queries += 1
@@ -647,7 +755,20 @@ def recommendations():
                 "cache": False,
                 "waste_queries": waste_queries,
             }
-            cache.setex(cache_key, 5 if DB_BOTTLENECK_MODE else 20, json.dumps(payload))
+            trace_step(
+                "python.redis.cache_set",
+                {
+                    "component.layer": "infrastructure",
+                    "infra.kind": "cache",
+                    "db.system": "redis",
+                    "db.operation": "SETEX",
+                    "db.redis.key": cache_key,
+                    "server.address": os.getenv("REDIS_HOST", "redis"),
+                    "server.port": int(os.getenv("REDIS_PORT", "6379")),
+                    "bottleneck.active": DB_BOTTLENECK_MODE,
+                },
+                lambda: cache.setex(cache_key, 5 if DB_BOTTLENECK_MODE else 20, json.dumps(payload)),
+            )
 
             if request.args.get("fail") == "1":
                 raise attach_error_context(

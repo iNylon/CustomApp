@@ -399,7 +399,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
 {
     global $requestId;
 
-    $mysqlProbe = probeStep('mysql', fn (array $_span, array $_appSpan) => queryMysql(), $logger, $emitter, $rootSpan, [
+    $mysqlProbe = probeStep('mysql', fn (array $span, array $_appSpan) => queryMysql(false, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'mysql',
@@ -410,7 +410,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
       'code.function.name' => 'queryMysql',
       'code.file.path' => __FILE__,
     ]);
-    $mysqlShadowProbe = probeStep('mysql_shadow', fn (array $_span, array $_appSpan) => queryMysql(), $logger, $emitter, $rootSpan, [
+    $mysqlShadowProbe = probeStep('mysql_shadow', fn (array $span, array $_appSpan) => queryMysql(false, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'mysql',
@@ -421,7 +421,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
       'code.function.name' => 'queryMysql',
       'code.file.path' => __FILE__,
     ]);
-    $postgresProbe = probeStep('postgres', fn (array $_span, array $_appSpan) => queryPostgres(), $logger, $emitter, $rootSpan, [
+    $postgresProbe = probeStep('postgres', fn (array $span, array $_appSpan) => queryPostgres(false, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'postgresql',
@@ -432,7 +432,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
       'code.function.name' => 'queryPostgres',
       'code.file.path' => __FILE__,
     ]);
-    $postgresShadowProbe = probeStep('postgres_shadow', fn (array $_span, array $_appSpan) => queryPostgres(), $logger, $emitter, $rootSpan, [
+    $postgresShadowProbe = probeStep('postgres_shadow', fn (array $span, array $_appSpan) => queryPostgres(false, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'postgresql',
@@ -443,7 +443,7 @@ function route(string $path, string $method, AppLogger $logger, OtlpHttpEmitter 
       'code.function.name' => 'queryPostgres',
       'code.file.path' => __FILE__,
     ]);
-    $redisProbe = probeStep('redis', fn (array $_span, array $_appSpan) => queryRedis(), $logger, $emitter, $rootSpan, [
+    $redisProbe = probeStep('redis', fn (array $span, array $_appSpan) => queryRedis(false, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'cache',
       'db.system' => 'redis',
@@ -606,21 +606,54 @@ function stripProbeTelemetry(array $data): array
   return $data;
 }
 
-function queryMysql(bool $forceFailure = false): array
+function traceDatabaseStep(?OtlpHttpEmitter $emitter, ?array $parentSpan, string $name, array $attributes, callable $operation)
+{
+    if ($emitter === null || $parentSpan === null) {
+        return $operation();
+    }
+
+    $stepStart = microtime(true);
+    $span = $emitter->startSpan($name, $attributes, $parentSpan);
+
+    try {
+        $result = $operation();
+        $emitter->exportTrace($emitter->finishSpan($span, [
+            'duration_ms' => round((microtime(true) - $stepStart) * 1000, 2),
+        ]));
+        return $result;
+    } catch (Throwable $error) {
+        $emitter->exportTrace($emitter->finishSpan($span, array_merge([
+            'duration_ms' => round((microtime(true) - $stepStart) * 1000, 2),
+        ], describeThrowable($error)), true, $error->getMessage()));
+        throw $error;
+    }
+}
+
+function queryMysql(bool $forceFailure = false, ?OtlpHttpEmitter $emitter = null, ?array $parentSpan = null): array
 {
     $queryStart = microtime(true);
     $connectStart = microtime(true);
-    $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
-    if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
-        $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = true;
-    }
+    $pdo = traceDatabaseStep($emitter, $parentSpan, 'php.mysql.connect', [
+        'component.layer' => 'infrastructure',
+        'infra.kind' => 'database',
+        'db.system' => 'mysql',
+        'db.operation' => 'CONNECT',
+        'server.address' => 'mysql',
+        'server.port' => 3306,
+        'bottleneck.active' => isDbBottleneckModeEnabled(),
+    ], function (): PDO {
+        $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+        if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
+            $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = true;
+        }
 
-    $pdo = new PDO(
-        getenv('MYSQL_DSN') ?: 'mysql:host=mysql;port=3306;dbname=catalog',
-        getenv('MYSQL_USER') ?: 'app',
-        getenv('MYSQL_PASSWORD') ?: 'app',
-        $options
-    );
+        return new PDO(
+            getenv('MYSQL_DSN') ?: 'mysql:host=mysql;port=3306;dbname=catalog',
+            getenv('MYSQL_USER') ?: 'app',
+            getenv('MYSQL_PASSWORD') ?: 'app',
+            $options
+        );
+    });
     $connectionWaitMs = round((microtime(true) - $connectStart) * 1000, 2);
 
     $wasteQueries = 0;
@@ -643,7 +676,17 @@ function queryMysql(bool $forceFailure = false): array
 
             $statement = 'SELECT id FROM products WHERE id = 1 FOR UPDATE';
             $operationName = 'SELECT';
-            $stmt = $pdo->query('SELECT id FROM products WHERE id = 1 FOR UPDATE');
+            $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.mysql.select_for_update', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'database',
+                'db.system' => 'mysql',
+                'db.operation' => 'SELECT',
+                'db.query_type' => 'select_for_update',
+                'db.sql.table' => 'products',
+                'server.address' => 'mysql',
+                'server.port' => 3306,
+                'bottleneck.active' => true,
+            ], fn () => $pdo->query('SELECT id FROM products WHERE id = 1 FOR UPDATE'));
             $lockedRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
             $rowsReturned = count($lockedRows);
             $stmt->closeCursor();
@@ -653,7 +696,17 @@ function queryMysql(bool $forceFailure = false): array
 
             $statement = 'SELECT SLEEP(0.12) AS waited';
             $operationName = 'SELECT';
-            $stmt = $pdo->query('SELECT SLEEP(0.12) AS waited');
+            $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.mysql.lock_wait', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'database',
+                'db.system' => 'mysql',
+                'db.operation' => 'SELECT',
+                'db.query_type' => 'sleep',
+                'db.sql.table' => 'products',
+                'server.address' => 'mysql',
+                'server.port' => 3306,
+                'bottleneck.active' => true,
+            ], fn () => $pdo->query('SELECT SLEEP(0.12) AS waited'));
             $stmt->fetchColumn();
             $rowsReturned = 1;
             $stmt->closeCursor();
@@ -666,7 +719,18 @@ function queryMysql(bool $forceFailure = false): array
                 $category = $categories[$i % count($categories)];
                 $statement = 'SELECT COUNT(*) FROM products WHERE category = :category';
                 $operationName = 'SELECT';
-                $stmt = $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = :category');
+                $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.mysql.category_count', [
+                    'component.layer' => 'infrastructure',
+                    'infra.kind' => 'database',
+                    'db.system' => 'mysql',
+                    'db.operation' => 'SELECT',
+                    'db.query_type' => 'select_count',
+                    'db.sql.table' => 'products',
+                    'db.category' => $category,
+                    'server.address' => 'mysql',
+                    'server.port' => 3306,
+                    'bottleneck.active' => true,
+                ], fn () => $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = :category'));
                 $stmt->execute(['category' => $category]);
                 $stmt->fetchColumn();
                 $rowsReturned = 1;
@@ -707,7 +771,17 @@ function queryMysql(bool $forceFailure = false): array
 
             $statement = 'SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products';
             $operationName = 'SELECT';
-            $stmt = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products');
+            $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.mysql.aggregate_inventory', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'database',
+                'db.system' => 'mysql',
+                'db.operation' => 'SELECT',
+                'db.query_type' => 'select_aggregate',
+                'db.sql.table' => 'products',
+                'server.address' => 'mysql',
+                'server.port' => 3306,
+                'bottleneck.active' => isDbBottleneckModeEnabled(),
+            ], fn () => $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products'));
             $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
             $rowsReturned = $row === [] ? 0 : 1;
             $stmt->closeCursor();
@@ -747,7 +821,17 @@ function queryMysql(bool $forceFailure = false): array
     } else {
         $statement = 'SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products';
         $operationName = 'SELECT';
-        $stmt = $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products');
+        $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.mysql.aggregate_inventory', [
+            'component.layer' => 'infrastructure',
+            'infra.kind' => 'database',
+            'db.system' => 'mysql',
+            'db.operation' => 'SELECT',
+            'db.query_type' => 'select_aggregate',
+            'db.sql.table' => 'products',
+            'server.address' => 'mysql',
+            'server.port' => 3306,
+            'bottleneck.active' => false,
+        ], fn () => $pdo->query('SELECT COUNT(*) AS product_count, SUM(inventory) AS inventory_total FROM products'));
         $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
         $rowsReturned = $row === [] ? 0 : 1;
         $stmt->closeCursor();
@@ -776,16 +860,24 @@ function queryMysql(bool $forceFailure = false): array
     ];
 }
 
-function queryPostgres(bool $forceFailure = false): array
+function queryPostgres(bool $forceFailure = false, ?OtlpHttpEmitter $emitter = null, ?array $parentSpan = null): array
 {
     $queryStart = microtime(true);
     $connectStart = microtime(true);
-    $pdo = new PDO(
+    $pdo = traceDatabaseStep($emitter, $parentSpan, 'php.postgres.connect', [
+        'component.layer' => 'infrastructure',
+        'infra.kind' => 'database',
+        'db.system' => 'postgresql',
+        'db.operation' => 'CONNECT',
+        'server.address' => 'postgres',
+        'server.port' => 5432,
+        'bottleneck.active' => isDbBottleneckModeEnabled(),
+    ], fn () => new PDO(
         getenv('POSTGRES_DSN') ?: 'pgsql:host=postgres;port=5432;dbname=recommendations',
         getenv('POSTGRES_USER') ?: 'app',
         getenv('POSTGRES_PASSWORD') ?: 'app',
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
-    );
+    ));
     $connectionWaitMs = round((microtime(true) - $connectStart) * 1000, 2);
 
     $wasteQueries = 0;
@@ -809,7 +901,17 @@ function queryPostgres(bool $forceFailure = false): array
             $statement = 'SELECT id FROM users WHERE id = 1 FOR UPDATE';
             $table = 'users';
             $operationName = 'SELECT';
-            $stmt = $pdo->query('SELECT id FROM users WHERE id = 1 FOR UPDATE');
+            $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.postgres.select_for_update', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'database',
+                'db.system' => 'postgresql',
+                'db.operation' => 'SELECT',
+                'db.query_type' => 'select_for_update',
+                'db.sql.table' => 'users',
+                'server.address' => 'postgres',
+                'server.port' => 5432,
+                'bottleneck.active' => true,
+            ], fn () => $pdo->query('SELECT id FROM users WHERE id = 1 FOR UPDATE'));
             $lockedRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
             $rowsReturned = count($lockedRows);
             $stmt->closeCursor();
@@ -819,7 +921,17 @@ function queryPostgres(bool $forceFailure = false): array
 
             $statement = 'SELECT pg_sleep(0.15)';
             $operationName = 'SELECT';
-            $stmt = $pdo->query('SELECT pg_sleep(0.15)');
+            $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.postgres.lock_wait', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'database',
+                'db.system' => 'postgresql',
+                'db.operation' => 'SELECT',
+                'db.query_type' => 'sleep',
+                'db.sql.table' => 'users',
+                'server.address' => 'postgres',
+                'server.port' => 5432,
+                'bottleneck.active' => true,
+            ], fn () => $pdo->query('SELECT pg_sleep(0.15)'));
             $sleepRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
             $rowsReturned = count($sleepRows);
             $stmt->closeCursor();
@@ -832,7 +944,18 @@ function queryPostgres(bool $forceFailure = false): array
                 $statement = 'SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id';
                 $table = 'recommendations';
                 $operationName = 'SELECT';
-                $stmt = $pdo->prepare('SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id');
+                $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.postgres.recommendation_count', [
+                    'component.layer' => 'infrastructure',
+                    'infra.kind' => 'database',
+                    'db.system' => 'postgresql',
+                    'db.operation' => 'SELECT',
+                    'db.query_type' => 'select_count',
+                    'db.sql.table' => 'recommendations',
+                    'user.id' => $userId,
+                    'server.address' => 'postgres',
+                    'server.port' => 5432,
+                    'bottleneck.active' => true,
+                ], fn () => $pdo->prepare('SELECT COUNT(*) FROM recommendations WHERE user_id = :user_id'));
                 $stmt->execute(['user_id' => $userId]);
                 $stmt->fetchColumn();
                 $rowsReturned = 1;
@@ -874,7 +997,17 @@ function queryPostgres(bool $forceFailure = false): array
             $statement = 'SELECT COUNT(*) AS recommendation_count FROM recommendations';
             $table = 'recommendations';
             $operationName = 'SELECT';
-            $stmt = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations');
+            $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.postgres.aggregate_recommendations', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'database',
+                'db.system' => 'postgresql',
+                'db.operation' => 'SELECT',
+                'db.query_type' => 'select_aggregate',
+                'db.sql.table' => 'recommendations',
+                'server.address' => 'postgres',
+                'server.port' => 5432,
+                'bottleneck.active' => isDbBottleneckModeEnabled(),
+            ], fn () => $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations'));
             $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
             $rowsReturned = $row === [] ? 0 : 1;
             $stmt->closeCursor();
@@ -915,7 +1048,17 @@ function queryPostgres(bool $forceFailure = false): array
         $statement = 'SELECT COUNT(*) AS recommendation_count FROM recommendations';
         $table = 'recommendations';
         $operationName = 'SELECT';
-        $stmt = $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations');
+        $stmt = traceDatabaseStep($emitter, $parentSpan, 'php.postgres.aggregate_recommendations', [
+            'component.layer' => 'infrastructure',
+            'infra.kind' => 'database',
+            'db.system' => 'postgresql',
+            'db.operation' => 'SELECT',
+            'db.query_type' => 'select_aggregate',
+            'db.sql.table' => 'recommendations',
+            'server.address' => 'postgres',
+            'server.port' => 5432,
+            'bottleneck.active' => false,
+        ], fn () => $pdo->query('SELECT COUNT(*) AS recommendation_count FROM recommendations'));
         $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
         $rowsReturned = $row === [] ? 0 : 1;
         $stmt->closeCursor();
@@ -943,12 +1086,23 @@ function queryPostgres(bool $forceFailure = false): array
     ];
 }
 
-function queryRedis(bool $forceFailure = false): array
+function queryRedis(bool $forceFailure = false, ?OtlpHttpEmitter $emitter = null, ?array $parentSpan = null): array
 {
     $queryStart = microtime(true);
     $connectStart = microtime(true);
-    $redis = new Redis();
-    $redis->connect(getenv('REDIS_HOST') ?: 'redis', (int) (getenv('REDIS_PORT') ?: 6379), 1.5);
+    $redis = traceDatabaseStep($emitter, $parentSpan, 'php.redis.connect', [
+        'component.layer' => 'infrastructure',
+        'infra.kind' => 'cache',
+        'db.system' => 'redis',
+        'db.operation' => 'CONNECT',
+        'server.address' => 'redis',
+        'server.port' => 6379,
+        'bottleneck.active' => isDbBottleneckModeEnabled(),
+    ], function (): Redis {
+        $redis = new Redis();
+        $redis->connect(getenv('REDIS_HOST') ?: 'redis', (int) (getenv('REDIS_PORT') ?: 6379), 1.5);
+        return $redis;
+    });
     $connectionWaitMs = round((microtime(true) - $connectStart) * 1000, 2);
 
     $loops = max(1, min((int) (getenv('APP_REDIS_BOTTLENECK_LOOPS') ?: 20), 200));
@@ -958,27 +1112,88 @@ function queryRedis(bool $forceFailure = false): array
     $table = 'redis:hotspot:counter';
     $operationName = 'WATCH_MULTI_EXEC';
 
-    $redis->set('php:last_seen', gmdate('c'));
+    traceDatabaseStep($emitter, $parentSpan, 'php.redis.marker_set', [
+        'component.layer' => 'infrastructure',
+        'infra.kind' => 'cache',
+        'db.system' => 'redis',
+        'db.operation' => 'SET',
+        'db.redis.key' => 'php:last_seen',
+        'server.address' => 'redis',
+        'server.port' => 6379,
+        'bottleneck.active' => false,
+    ], fn () => $redis->set('php:last_seen', gmdate('c')));
     $hotKey = 'redis:hotspot:counter';
 
     if (isDbBottleneckModeEnabled()) {
         for ($i = 0; $i < $loops; $i++) {
-            $redis->watch($hotKey);
-            $current = (int) ($redis->get($hotKey) ?: 0);
-            usleep(40000);
+            $tx = false;
+            traceDatabaseStep($emitter, $parentSpan, 'php.redis.watch', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'cache',
+                'db.system' => 'redis',
+                'db.operation' => 'WATCH',
+                'db.redis.key' => $hotKey,
+                'server.address' => 'redis',
+                'server.port' => 6379,
+                'bottleneck.active' => true,
+            ], fn () => $redis->watch($hotKey));
+            $current = (int) (traceDatabaseStep($emitter, $parentSpan, 'php.redis.get_hot_key', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'cache',
+                'db.system' => 'redis',
+                'db.operation' => 'GET',
+                'db.redis.key' => $hotKey,
+                'server.address' => 'redis',
+                'server.port' => 6379,
+                'bottleneck.active' => true,
+            ], fn () => $redis->get($hotKey)) ?: 0);
+            traceDatabaseStep($emitter, $parentSpan, 'php.redis.lock_wait', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'cache',
+                'db.system' => 'redis',
+                'db.operation' => 'WAIT',
+                'db.redis.key' => $hotKey,
+                'server.address' => 'redis',
+                'server.port' => 6379,
+                'bottleneck.active' => true,
+            ], function (): void {
+                usleep(40000);
+            });
 
-            $redis->multi();
-            $redis->set($hotKey, (string) ($current + 1));
-            $redis->expire($hotKey, 120);
-            $tx = $redis->exec();
+            traceDatabaseStep($emitter, $parentSpan, 'php.redis.multi_exec', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'cache',
+                'db.system' => 'redis',
+                'db.operation' => 'MULTI',
+                'db.redis.key' => $hotKey,
+                'server.address' => 'redis',
+                'server.port' => 6379,
+                'bottleneck.active' => true,
+            ], function () use ($redis, $hotKey, $current, &$tx): void {
+                $redis->multi();
+                $redis->set($hotKey, (string) ($current + 1));
+                $redis->expire($hotKey, 120);
+                $tx = $redis->exec();
+            });
 
             if ($tx === false) {
                 $retryConflicts++;
                 continue;
             }
 
-            $redis->get($hotKey);
-            $redis->pttl($hotKey);
+            traceDatabaseStep($emitter, $parentSpan, 'php.redis.readback', [
+                'component.layer' => 'infrastructure',
+                'infra.kind' => 'cache',
+                'db.system' => 'redis',
+                'db.operation' => 'GET',
+                'db.redis.key' => $hotKey,
+                'server.address' => 'redis',
+                'server.port' => 6379,
+                'bottleneck.active' => true,
+            ], function () use ($redis, $hotKey): void {
+                $redis->get($hotKey);
+                $redis->pttl($hotKey);
+            });
             $wasteOps += 4;
         }
     }
@@ -1010,8 +1225,25 @@ function queryRedis(bool $forceFailure = false): array
 
     $durationMs = round((microtime(true) - $queryStart) * 1000, 2);
     return [
-        'redis_ping' => $redis->ping(),
-        'php_last_seen' => (string) $redis->get('php:last_seen'),
+        'redis_ping' => traceDatabaseStep($emitter, $parentSpan, 'php.redis.ping', [
+            'component.layer' => 'infrastructure',
+            'infra.kind' => 'cache',
+            'db.system' => 'redis',
+            'db.operation' => 'PING',
+            'server.address' => 'redis',
+            'server.port' => 6379,
+            'bottleneck.active' => isDbBottleneckModeEnabled(),
+        ], fn () => $redis->ping()),
+        'php_last_seen' => (string) traceDatabaseStep($emitter, $parentSpan, 'php.redis.read_marker', [
+            'component.layer' => 'infrastructure',
+            'infra.kind' => 'cache',
+            'db.system' => 'redis',
+            'db.operation' => 'GET',
+            'db.redis.key' => 'php:last_seen',
+            'server.address' => 'redis',
+            'server.port' => 6379,
+            'bottleneck.active' => isDbBottleneckModeEnabled(),
+        ], fn () => $redis->get('php:last_seen')),
         'redis_waste_ops' => $wasteOps,
         'redis_tx_conflicts' => $retryConflicts,
         '_telemetry' => array_merge(
@@ -2695,7 +2927,7 @@ function readProcStatusMb(string $metric): float
 function triggerFault(string $target, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan): array
 {
   return match ($target) {
-    'mysql' => triggerProbeFault('mysql', fn (array $_span, array $_appSpan) => queryMysql(true), $logger, $emitter, $rootSpan, [
+    'mysql' => triggerProbeFault('mysql', fn (array $span, array $_appSpan) => queryMysql(true, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'mysql',
@@ -2706,7 +2938,7 @@ function triggerFault(string $target, AppLogger $logger, OtlpHttpEmitter $emitte
       'code.function.name' => 'queryMysql',
       'code.file.path' => __FILE__,
     ]),
-    'postgres' => triggerProbeFault('postgres', fn (array $_span, array $_appSpan) => queryPostgres(true), $logger, $emitter, $rootSpan, [
+    'postgres' => triggerProbeFault('postgres', fn (array $span, array $_appSpan) => queryPostgres(true, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'database',
       'db.system' => 'postgresql',
@@ -2717,7 +2949,7 @@ function triggerFault(string $target, AppLogger $logger, OtlpHttpEmitter $emitte
       'code.function.name' => 'queryPostgres',
       'code.file.path' => __FILE__,
     ]),
-    'redis' => triggerProbeFault('redis', fn (array $_span, array $_appSpan) => queryRedis(true), $logger, $emitter, $rootSpan, [
+    'redis' => triggerProbeFault('redis', fn (array $span, array $_appSpan) => queryRedis(true, $emitter, $span), $logger, $emitter, $rootSpan, [
       'component.layer' => 'infrastructure',
       'infra.kind' => 'cache',
       'db.system' => 'redis',

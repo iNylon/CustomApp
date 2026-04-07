@@ -138,7 +138,20 @@ public final class App {
       Span span = tracer.spanBuilder("java.quote").setParent(parentContext).setSpanKind(SpanKind.SERVER).startSpan();
       try (Scope scope = span.makeCurrent(); Jedis jedis = new Jedis(REDIS_HOST, REDIS_PORT)) {
         span.setAttribute("request.id", requestId);
-        jedis.set("java:last_quote", Instant.now().toString());
+        span.setAttribute("peer.service", "redis");
+        runTracedStep(tracer, "java.redis.marker_set", Map.of(
+            "component.layer", "infrastructure",
+            "infra.kind", "cache",
+            "db.system", "redis",
+            "db.operation", "SET",
+            "db.redis.key", "java:last_quote",
+            "server.address", REDIS_HOST,
+            "server.port", REDIS_PORT,
+            "bottleneck.active", false
+        ), () -> {
+          jedis.set("java:last_quote", Instant.now().toString());
+          return null;
+        });
         double quote = 29.99 + RANDOM.nextInt(60);
         boolean failure = RANDOM.nextInt(100) < Math.max(0, Math.min(FAILURE_RATE_PERCENT, 100));
         boolean forceFailure = "fail=1".equals(exchange.getRequestURI().getQuery());
@@ -147,7 +160,17 @@ public final class App {
           throw new RuntimeException("java checkout quote computation failed");
         }
 
-        String body = "{\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\",\"quote\":" + quote + ",\"redis_marker\":\"" + jedis.get("java:last_quote") + "\"}";
+        String redisMarker = runTracedStep(tracer, "java.redis.marker_get", Map.of(
+            "component.layer", "infrastructure",
+            "infra.kind", "cache",
+            "db.system", "redis",
+            "db.operation", "GET",
+            "db.redis.key", "java:last_quote",
+            "server.address", REDIS_HOST,
+            "server.port", REDIS_PORT,
+            "bottleneck.active", false
+        ), () -> jedis.get("java:last_quote"));
+        String body = "{\"service\":\"" + SERVICE_NAME + "\",\"request_id\":\"" + requestId + "\",\"quote\":" + quote + ",\"redis_marker\":\"" + redisMarker + "\"}";
         writeJson(exchange, 200, body);
         log("INFO", "java quote served", Map.of("quote", quote, "request_id", requestId, "status", 200));
       } catch (Exception error) {
@@ -214,6 +237,44 @@ public final class App {
         .put(AttributeKey.stringKey("route"), route)
         .put(AttributeKey.longKey("status"), statusCode)
         .build();
+  }
+
+  @FunctionalInterface
+  private interface TracedSupplier<T> {
+    T run() throws Exception;
+  }
+
+  private static <T> T runTracedStep(Tracer tracer, String name, Map<String, ?> attributes, TracedSupplier<T> supplier) throws Exception {
+    Span span = tracer.spanBuilder(name).setSpanKind(SpanKind.INTERNAL).startSpan();
+    try (Scope scope = span.makeCurrent()) {
+      for (Map.Entry<String, ?> entry : attributes.entrySet()) {
+        putSpanAttribute(span, entry.getKey(), entry.getValue());
+      }
+      T result = supplier.run();
+      span.end();
+      return result;
+    } catch (Exception error) {
+      applyErrorAttributes(span, error, SERVICE_NAME, "infrastructure");
+      span.setStatus(StatusCode.ERROR, error.getMessage());
+      span.end();
+      throw error;
+    }
+  }
+
+  private static void putSpanAttribute(Span span, String key, Object value) {
+    if (value instanceof String) {
+      span.setAttribute(key, (String) value);
+    } else if (value instanceof Integer) {
+      span.setAttribute(key, (Integer) value);
+    } else if (value instanceof Long) {
+      span.setAttribute(key, (Long) value);
+    } else if (value instanceof Double) {
+      span.setAttribute(key, (Double) value);
+    } else if (value instanceof Boolean) {
+      span.setAttribute(key, (Boolean) value);
+    } else if (value != null) {
+      span.setAttribute(key, String.valueOf(value));
+    }
   }
 
   private static void recordResourceMetrics(
