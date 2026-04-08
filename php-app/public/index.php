@@ -2852,16 +2852,11 @@ function emitPhpProcessResourceTelemetry(string $path, int $status, AppLogger $l
 function withPhpSpanResourceAttributes(array $attributes, string $scope = 'span', string $route = '', int $status = 0): array
 {
     $snapshot = samplePhpProcessResources();
-    $pid = getmypid();
 
     return array_merge($attributes, [
-        'resource.scope' => $scope,
-        'resource.pid' => $pid === false ? 0 : $pid,
         'resource.cpu_percent' => $snapshot['cpu_percent'],
-        'resource.memory_usage_mb' => $snapshot['memory_usage_mb'],
-        'resource.memory_peak_mb' => $snapshot['memory_peak_mb'],
         'resource.memory_rss_mb' => $snapshot['memory_rss_mb'],
-    ], $route !== '' ? ['resource.route' => $route] : [], $status > 0 ? ['resource.status' => $status] : []);
+    ]);
 }
 
 function samplePhpProcessResources(): array

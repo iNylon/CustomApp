@@ -129,16 +129,18 @@ def get_redis():
 
 def trace_step(name: str, attributes: dict, operation):
     with tracer.start_as_current_span(name, kind=SpanKind.INTERNAL) as span:
+        start_cpu = time.process_time()
+        start_wall = time.perf_counter()
         for key, value in attributes.items():
             span.set_attribute(key, value)
         try:
             result = operation()
-            set_span_resource_attributes(span, "component")
+            set_span_resource_attributes(span, start_cpu, start_wall)
             return result
         except Exception as error:
             apply_error_attributes(span, error)
             span.set_status(Status(StatusCode.ERROR, str(error)))
-            set_span_resource_attributes(span, "component")
+            set_span_resource_attributes(span, start_cpu, start_wall)
             raise
 
 
@@ -226,19 +228,16 @@ def sample_process_resources():
     }
 
 
-def set_span_resource_attributes(span, scope: str = "span", extra: Optional[dict] = None):
+def set_span_resource_attributes(span, start_cpu: float, start_wall: float):
     if span is None:
         return None
-    snapshot = sample_process_resources()
-    span.set_attribute("resource.scope", scope)
-    span.set_attribute("resource.pid", snapshot["pid"])
-    span.set_attribute("resource.cpu_percent", snapshot["cpu_percent"])
-    span.set_attribute("resource.memory_rss_mb", snapshot["memory_rss_mb"])
-    span.set_attribute("resource.memory_virtual_mb", snapshot["memory_virtual_mb"])
-    for key, value in (extra or {}).items():
-        if value is not None and value != "":
-            span.set_attribute(f"resource.{key}", value)
-    return snapshot
+    cpu_delta = max(time.process_time() - start_cpu, 0.0)
+    wall_delta = max(time.perf_counter() - start_wall, 1e-9)
+    memory_stats = read_proc_memory_stats()
+    cpu_percent = round((cpu_delta / wall_delta) * 100, 2)
+    span.set_attribute("resource.cpu_percent", cpu_percent)
+    span.set_attribute("resource.memory_rss_mb", memory_stats["rss_mb"])
+    return {"cpu_percent": cpu_percent, "memory_rss_mb": memory_stats["rss_mb"]}
 
 
 def record_process_resource_metrics(scope: str, route: str = "", status: Optional[int] = None, component: str = "runtime", emit_log: bool = False):
@@ -620,6 +619,8 @@ def healthz():
 def recommendations():
     user_id = int(request.args.get("user_id", "1"))
     with tracer.start_as_current_span("python.recommendations", kind=SpanKind.SERVER, attributes={"user.id": user_id, "http.route": "/recommendations", "http.method": "GET"}):
+        start_cpu = time.process_time()
+        start_wall = time.perf_counter()
         span = trace.get_current_span()
         span.set_attribute("request.id", request._request_id)
         try:
@@ -643,7 +644,7 @@ def recommendations():
                 payload = json.loads(cached)
                 payload["request_id"] = request._request_id
                 log("INFO", "served recommendations from cache", user_id=user_id, request_id=request._request_id)
-                set_span_resource_attributes(span, "request", {"route": "/recommendations", "status": 200})
+                set_span_resource_attributes(span, start_cpu, start_wall)
                 return jsonify(payload)
 
             with trace_step(
@@ -836,17 +837,17 @@ def recommendations():
                         "db.lock_target": "users.id=1",
                         "db.operation_sequence": " > ".join(operation_sequence),
                     },
-                )
+            )
 
             log("INFO", "served recommendations from postgres", user_id=user_id, count=len(payload["items"]), request_id=request._request_id)
-            set_span_resource_attributes(span, "request", {"route": "/recommendations", "status": 200})
+            set_span_resource_attributes(span, start_cpu, start_wall)
             return jsonify(payload)
         except Exception as error:
             error_counter.add(1, {"route": request.path})
             span.record_exception(error)
             apply_error_attributes(span, error)
             span.set_status(Status(StatusCode.ERROR, str(error)))
-            set_span_resource_attributes(span, "request", {"route": request.path, "status": 503})
+            set_span_resource_attributes(span, start_cpu, start_wall)
             log(
                 "ERROR",
                 "python recommendations failed",

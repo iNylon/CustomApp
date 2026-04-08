@@ -30,6 +30,7 @@ import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -61,6 +62,7 @@ public final class App {
   private static final String APM_PROFILE = System.getenv().getOrDefault("CUSTOMAPP_APM_PROFILE", "true".equals(APM_ENABLED) ? "with-apm" : "without-apm");
   private static final Random RANDOM = new Random();
   private static final OperatingSystemMXBean OS_BEAN = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
+  private static final ThreadMXBean THREAD_BEAN = ManagementFactory.getThreadMXBean();
   private static final TextMapGetter<Headers> HEADER_GETTER = new TextMapGetter<>() {
     @Override
     public Iterable<String> keys(Headers carrier) {
@@ -135,7 +137,7 @@ public final class App {
       double durationMs = (System.nanoTime() - start) / 1_000_000.0;
       latencyHistogram.record(durationMs, requestAttributes("/healthz", 200));
       recordResourceMetrics(resourceCpuHistogram, resourceMemoryHistogram, resourceCommittedMemoryHistogram, "request", "/healthz", 200, false);
-      attachResourceAttributes(Span.current(), "request", "/healthz", 200);
+      attachResourceAttributes(Span.current(), System.nanoTime(), currentThreadCpuTimeNanos());
       log("INFO", "java health served", Map.of("request_id", requestId, "status", 200, "duration_ms", roundDuration(durationMs)));
     });
 
@@ -146,6 +148,8 @@ public final class App {
       int[] statusCode = {200};
       Context parentContext = W3CTraceContextPropagator.getInstance().extract(Context.root(), exchange.getRequestHeaders(), HEADER_GETTER);
       Span span = tracer.spanBuilder("java.quote").setParent(parentContext).setSpanKind(SpanKind.SERVER).startSpan();
+      long spanStartWallNanos = System.nanoTime();
+      long spanStartCpuNanos = currentThreadCpuTimeNanos();
       try (Scope scope = span.makeCurrent(); Jedis jedis = new Jedis(REDIS_HOST, REDIS_PORT)) {
         span.setAttribute("request.id", requestId);
         span.setAttribute("peer.service", "redis");
@@ -199,7 +203,7 @@ public final class App {
         requestCounter.add(1, requestAttributes("/quote", statusCode[0]));
         latencyHistogram.record(durationMs, requestAttributes("/quote", statusCode[0]));
         recordResourceMetrics(resourceCpuHistogram, resourceMemoryHistogram, resourceCommittedMemoryHistogram, "request", "/quote", statusCode[0], false);
-        attachResourceAttributes(span, "request", "/quote", statusCode[0]);
+        attachResourceAttributes(span, spanStartWallNanos, spanStartCpuNanos);
         log("INFO", "java request complete", Map.of("path", "/quote", "status", statusCode[0], "duration_ms", roundDuration(durationMs), "request_id", requestId));
         if (durationMs >= SLOW_LOG_THRESHOLD_MS) {
           log("WARN", "java request exceeded slow threshold", Map.of("path", "/quote", "status", statusCode[0], "duration_ms", roundDuration(durationMs), "request_id", requestId));
@@ -257,18 +261,20 @@ public final class App {
 
   private static <T> T runTracedStep(Tracer tracer, String name, Map<String, ?> attributes, TracedSupplier<T> supplier) throws Exception {
     Span span = tracer.spanBuilder(name).setSpanKind(SpanKind.INTERNAL).startSpan();
+    long spanStartWallNanos = System.nanoTime();
+    long spanStartCpuNanos = currentThreadCpuTimeNanos();
     try (Scope scope = span.makeCurrent()) {
       for (Map.Entry<String, ?> entry : attributes.entrySet()) {
         putSpanAttribute(span, entry.getKey(), entry.getValue());
       }
       T result = supplier.run();
-      attachResourceAttributes(span, "component", "", 0);
+      attachResourceAttributes(span, spanStartWallNanos, spanStartCpuNanos);
       span.end();
       return result;
     } catch (Exception error) {
       applyErrorAttributes(span, error, SERVICE_NAME, "infrastructure");
       span.setStatus(StatusCode.ERROR, error.getMessage());
-      attachResourceAttributes(span, "component", "", 0);
+      attachResourceAttributes(span, spanStartWallNanos, spanStartCpuNanos);
       span.end();
       throw error;
     }
@@ -336,25 +342,39 @@ public final class App {
     }
   }
 
-  private static void attachResourceAttributes(Span span, String scope, String route, int statusCode) {
+  private static void attachResourceAttributes(Span span, long startWallNanos, long startCpuNanos) {
     if (span == null) {
       return;
     }
-    Map<String, Double> memoryStats = memoryStatsMb();
-    double cpuPercent = processCpuPercent();
-    long pid = ProcessHandle.current().pid();
-    span.setAttribute("resource.scope", scope);
-    span.setAttribute("resource.pid", pid);
+    long wallNanos = Math.max(System.nanoTime() - startWallNanos, 1L);
+    long cpuNanos = Math.max(currentThreadCpuTimeNanos() - startCpuNanos, 0L);
+    double cpuPercent = roundDuration((cpuNanos / (double) wallNanos) * 100.0);
     span.setAttribute("resource.cpu_percent", cpuPercent);
-    span.setAttribute("resource.memory_used_mb", memoryStats.get("used_mb"));
-    span.setAttribute("resource.memory_committed_mb", memoryStats.get("committed_mb"));
-    span.setAttribute("resource.memory_max_mb", memoryStats.get("max_mb"));
-    if (!route.isBlank()) {
-      span.setAttribute("resource.route", route);
+    span.setAttribute("resource.memory_rss_mb", currentProcessRssMb());
+  }
+
+  private static long currentThreadCpuTimeNanos() {
+    if (THREAD_BEAN != null && THREAD_BEAN.isCurrentThreadCpuTimeSupported()) {
+      if (!THREAD_BEAN.isThreadCpuTimeEnabled()) {
+        THREAD_BEAN.setThreadCpuTimeEnabled(true);
+      }
+      return Math.max(THREAD_BEAN.getCurrentThreadCpuTime(), 0L);
     }
-    if (statusCode > 0) {
-      span.setAttribute("resource.status", statusCode);
+    return 0L;
+  }
+
+  private static double currentProcessRssMb() {
+    try {
+      java.util.List<String> lines = java.nio.file.Files.readAllLines(java.nio.file.Path.of("/proc/self/status"));
+      for (String line : lines) {
+        if (line.startsWith("VmRSS:")) {
+          String[] parts = line.trim().split("\\s+");
+          return roundDuration(Long.parseLong(parts[1]) / 1024.0);
+        }
+      }
+    } catch (Exception ignored) {
     }
+    return 0.0;
   }
 
   private static double processCpuPercent() {
