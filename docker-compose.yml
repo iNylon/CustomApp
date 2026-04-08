@@ -13,7 +13,7 @@ services:
       APP_SERVICE_NAME: php-storefront
       APP_PORT: "8080"
       APP_LOG_FILE: /var/telemetry-logs/php-storefront.log
-      APP_ENABLE_RUM: "true"
+      APP_ENABLE_RUM: ${CUSTOMAPP_APM_ENABLED:-true}
       APP_RUM_CLIENT_TOKEN: rumsc8iFvkD9574Idx7
       APP_RUM_APPLICATION_ID: web-application-id
       APP_RUM_SITE: openobserve.dylanp.nl
@@ -158,6 +158,17 @@ services:
     volumes:
       - telemetry-logs:/var/telemetry-logs
 
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: poc-cadvisor
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+
   mysql:
     image: mysql:8.4
     container_name: poc-mysql
@@ -207,6 +218,7 @@ services:
       - mysql
       - postgres
       - redis
+      - cadvisor
 
   load-generator:
     build:

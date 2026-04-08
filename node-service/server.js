@@ -21,10 +21,11 @@ const resourceSampleIntervalMs = Math.max(5000, Number(process.env.APP_RESOURCE_
 const resourceWarnCpuPercent = Math.max(1, Number(process.env.APP_RESOURCE_WARN_CPU_PERCENT || '35'));
 const resourceWarnMemoryMb = Math.max(32, Number(process.env.APP_RESOURCE_WARN_MEMORY_MB || '180'));
 const measurementRun = process.env.CUSTOMAPP_MEASUREMENT_RUN || 'apm-on';
-const apmEnabled = (process.env.CUSTOMAPP_APM_ENABLED || 'true').toLowerCase() === 'true' ? 'true' : 'false';
+const apmEnabledBool = (process.env.CUSTOMAPP_APM_ENABLED || 'true').toLowerCase() === 'true';
+const apmEnabled = apmEnabledBool ? 'true' : 'false';
 const apmProfile = process.env.CUSTOMAPP_APM_PROFILE || (apmEnabled === 'true' ? 'with-apm' : 'without-apm');
 
-const sdk = new NodeSDK({
+const sdk = apmEnabledBool ? new NodeSDK({
   resource: new Resource({
     'service.name': serviceName,
     'service.namespace': 'openobserve-poc',
@@ -39,9 +40,11 @@ const sdk = new NodeSDK({
     exportIntervalMillis: 5000,
   }),
   instrumentations: [getNodeAutoInstrumentations()],
-});
+}) : null;
 
-sdk.start();
+if (sdk) {
+  sdk.start();
+}
 
 const tracer = trace.getTracer(serviceName);
 const meter = metrics.getMeter(serviceName);

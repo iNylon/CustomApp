@@ -19,6 +19,15 @@ receivers:
         severity:
           parse_from: attributes.severity
 
+  prometheus/cadvisor:
+    config:
+      scrape_configs:
+        - job_name: cadvisor
+          scrape_interval: 15s
+          static_configs:
+            - targets:
+                - cadvisor:8080
+
 processors:
   memory_limiter:
     check_interval: 1s
@@ -112,6 +121,7 @@ service:
     metrics:
       receivers:
         - otlp
+        - prometheus/cadvisor
       processors:
         - memory_limiter
         - filter/metrics

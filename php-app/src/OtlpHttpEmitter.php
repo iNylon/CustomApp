@@ -7,11 +7,16 @@ final class OtlpHttpEmitter
     public function __construct(
         private readonly string $baseUrl,
         private readonly array $resourceAttributes,
+        private readonly bool $enabled = true,
     ) {
     }
 
     public function exportTrace(array $span): void
     {
+        if (!$this->enabled) {
+            return;
+        }
+
         $payload = [
             'resourceSpans' => [[
                 'resource' => [
@@ -29,6 +34,10 @@ final class OtlpHttpEmitter
 
     public function exportMetrics(array $metrics): void
     {
+        if (!$this->enabled) {
+            return;
+        }
+
         $payload = [
             'resourceMetrics' => [[
                 'resource' => [
@@ -46,6 +55,17 @@ final class OtlpHttpEmitter
 
     public function startSpan(string $name, array $attributes = [], ?array $parentSpan = null, int $kind = 1): array
     {
+        if (!$this->enabled) {
+            return [
+                'name' => $name,
+                'traceId' => '',
+                'spanId' => '',
+                'kind' => $kind,
+                'startTimeUnixNano' => $this->nowNano(),
+                'attributes' => $this->attributes($attributes),
+            ];
+        }
+
         $span = [
             'name' => $name,
             'traceId' => $parentSpan['traceId'] ?? bin2hex(random_bytes(16)),

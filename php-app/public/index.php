@@ -28,7 +28,8 @@ $emitter = new OtlpHttpEmitter(
         'service.name' => $serviceName,
         'service.namespace' => 'openobserve-poc',
         'deployment.environment' => getenv('APP_ENV') ?: 'poc',
-    ], $measurementContext)
+    ], $measurementContext),
+    $apmEnabled === 'true'
 );
 $logger = new AppLogger($serviceName, $logFile, $measurementContext);
 

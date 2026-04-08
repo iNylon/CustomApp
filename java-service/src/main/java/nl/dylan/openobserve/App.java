@@ -57,6 +57,7 @@ public final class App {
   private static final double RESOURCE_WARN_MEMORY_MB = Double.parseDouble(System.getenv().getOrDefault("APP_RESOURCE_WARN_MEMORY_MB", "180"));
   private static final String MEASUREMENT_RUN = System.getenv().getOrDefault("CUSTOMAPP_MEASUREMENT_RUN", "apm-on");
   private static final String APM_ENABLED = "true".equalsIgnoreCase(System.getenv().getOrDefault("CUSTOMAPP_APM_ENABLED", "true")) ? "true" : "false";
+  private static final boolean APM_ENABLED_BOOL = "true".equals(APM_ENABLED);
   private static final String APM_PROFILE = System.getenv().getOrDefault("CUSTOMAPP_APM_PROFILE", "true".equals(APM_ENABLED) ? "with-apm" : "without-apm");
   private static final Random RANDOM = new Random();
   private static final OperatingSystemMXBean OS_BEAN = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
@@ -92,23 +93,25 @@ public final class App {
         .put("customapp_apm_profile", APM_PROFILE)
         .build()));
 
-    SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-        .setResource(resource)
-        .addSpanProcessor(BatchSpanProcessor.builder(OtlpGrpcSpanExporter.builder().setEndpoint(OTLP_ENDPOINT).build()).build())
-        .build();
+    if (APM_ENABLED_BOOL) {
+      SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+          .setResource(resource)
+          .addSpanProcessor(BatchSpanProcessor.builder(OtlpGrpcSpanExporter.builder().setEndpoint(OTLP_ENDPOINT).build()).build())
+          .build();
 
-    SdkMeterProvider meterProvider = SdkMeterProvider.builder()
-        .setResource(resource)
-        .registerMetricReader(PeriodicMetricReader.builder(
-            OtlpGrpcMetricExporter.builder().setEndpoint(OTLP_ENDPOINT).build())
-            .setInterval(java.time.Duration.ofSeconds(5))
-            .build())
-        .build();
+      SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+          .setResource(resource)
+          .registerMetricReader(PeriodicMetricReader.builder(
+              OtlpGrpcMetricExporter.builder().setEndpoint(OTLP_ENDPOINT).build())
+              .setInterval(java.time.Duration.ofSeconds(5))
+              .build())
+          .build();
 
-    OpenTelemetrySdk.builder()
-        .setTracerProvider(tracerProvider)
-        .setMeterProvider(meterProvider)
-        .buildAndRegisterGlobal();
+      OpenTelemetrySdk.builder()
+          .setTracerProvider(tracerProvider)
+          .setMeterProvider(meterProvider)
+          .buildAndRegisterGlobal();
+    }
 
     Tracer tracer = GlobalOpenTelemetry.getTracer(SERVICE_NAME);
     Meter meter = GlobalOpenTelemetry.getMeter(SERVICE_NAME);

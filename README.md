@@ -70,7 +70,7 @@ Beschikbare endpoints:
 - Alle services schrijven structured logs naar `/var/telemetry-logs/*.log`, die door de collector worden ingelezen.
 - Een Grafana-dashboard voor deze opzet staat in [`grafana/customapp-observability-deep-dive.json`](/Users/dylan/CustomApp/grafana/customapp-observability-deep-dive.json).
 - Naast `load-generator` draait ook `rum-browser-runner`, een echte headless browser die synthetische storefront-sessies opbouwt zodat OpenObserve RUM sessies, interacties en browser-errors kan registreren.
-- Alle runtimes labelen metrics, traces en logs nu ook met `customapp_measurement_run`, `customapp_apm_enabled` en `customapp_apm_profile`, zodat je baseline-runs en APM-runs in Grafana direct naast elkaar kunt vergelijken.
+- Alle runtimes labelen metrics, traces en logs nu ook met `customapp_measurement_run`, `customapp_apm_enabled` en `customapp_apm_profile`.
 
 ## Synthetische RUM-sessies
 
@@ -113,15 +113,18 @@ Voor de requirement "De APM-oplossing moet inzicht bieden in de impact van monit
 - zonder APM: `CUSTOMAPP_MEASUREMENT_RUN=baseline-no-apm CUSTOMAPP_APM_ENABLED=false CUSTOMAPP_APM_PROFILE=without-apm docker compose up --build`
 - met APM: `CUSTOMAPP_MEASUREMENT_RUN=apm-on CUSTOMAPP_APM_ENABLED=true CUSTOMAPP_APM_PROFILE=with-apm docker compose up --build`
 
+Bij de run zonder APM worden app-traces, app-metrics en RUM bewust niet verstuurd. De vergelijking in Grafana gebeurt daarom via onafhankelijke container-metrics uit `cAdvisor`, die door de OpenTelemetry Collector naar `poc-metrics` worden gestuurd.
+
 Het dashboard [`grafana/customapp-observability-deep-dive.json`](/Users/dylan/CustomApp/grafana/customapp-observability-deep-dive.json) bevat hiervoor een aparte sectie `APM Impact` met:
 
-- CPU delta versus zonder APM
-- memory delta versus zonder APM
-- latency delta versus zonder APM
-- throughput-controle om te checken dat beide runs vergelijkbare load hadden
-- tijdseries per meetrun voor CPU, memory, requestduur en throughput
+- app CPU nu, baseline en verschil
+- app memory nu, baseline en verschil
+- tijdseries voor CPU en memory nu versus baseline
+- per-service vergelijking op container CPU en container memory
 
-Daardoor kun je in één dashboard zichtbaar maken of extra monitoring leidt tot hoger resourcegebruik of slechtere applicatieprestatie.
+Gebruik in Grafana de variable `Baseline Offset` om de huidige APM-run te vergelijken met de eerdere baseline-run, bijvoorbeeld `1h` of `6h` terug.
+
+Daardoor kun je in één dashboard zichtbaar maken of extra monitoring leidt tot hoger resourcegebruik van de applicatie, ook als de baseline-run zelf geen app-telemetrie verstuurt.
 
 ## Requirement: bottlenecks visueel inzichtelijk
 

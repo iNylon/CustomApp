@@ -58,17 +58,19 @@ resource = Resource.create(
     }
 )
 
-trace_provider = TracerProvider(resource=resource)
-trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=OTLP_ENDPOINT, insecure=True)))
-trace.set_tracer_provider(trace_provider)
+if APM_ENABLED == "true":
+    trace_provider = TracerProvider(resource=resource)
+    trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=OTLP_ENDPOINT, insecure=True)))
+    trace.set_tracer_provider(trace_provider)
 tracer = trace.get_tracer(SERVICE_NAME)
 
-metric_reader = PeriodicExportingMetricReader(
-    OTLPMetricExporter(endpoint=OTLP_ENDPOINT, insecure=True),
-    export_interval_millis=5000,
-)
-meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
-metrics.set_meter_provider(meter_provider)
+if APM_ENABLED == "true":
+    metric_reader = PeriodicExportingMetricReader(
+        OTLPMetricExporter(endpoint=OTLP_ENDPOINT, insecure=True),
+        export_interval_millis=5000,
+    )
+    meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+    metrics.set_meter_provider(meter_provider)
 meter = metrics.get_meter(SERVICE_NAME)
 request_counter = meter.create_counter("python_requests_total")
 error_counter = meter.create_counter("python_errors_total")

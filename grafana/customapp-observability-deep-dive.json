@@ -809,14 +809,14 @@
     {
       "id": 118,
       "type": "stat",
-      "title": "APM Impact · CPU Delta vs Zonder APM",
-      "description": "Positieve waarde betekent meer gemiddeld CPU-gebruik met APM ingeschakeld over alle runtimes samen.",
+      "title": "APM Impact · App CPU Nu",
+      "description": "Totale container-CPU van de applicatieservices tijdens de huidige run met de huidige dashboardtijd.",
       "gridPos": { "x": 0, "y": 124, "w": 6, "h": 4 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
           "refId": "A",
-          "expr": "((sum(rate(java_process_cpu_percent_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(java_process_cpu_percent_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(node_process_cpu_percent_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(node_process_cpu_percent_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(php_process_cpu_percent_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(php_process_cpu_percent_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(python_process_cpu_percent_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(python_process_cpu_percent_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9))) - ((sum(rate(java_process_cpu_percent_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(java_process_cpu_percent_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(node_process_cpu_percent_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(node_process_cpu_percent_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(php_process_cpu_percent_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(php_process_cpu_percent_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(python_process_cpu_percent_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(python_process_cpu_percent_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)))",
+          "expr": "100 * sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}[$__rate_interval]))",
           "instant": true,
           "range": true
         }
@@ -840,14 +840,76 @@
     {
       "id": 119,
       "type": "stat",
-      "title": "APM Impact · Memory Delta vs Zonder APM",
-      "description": "Positieve waarde betekent meer gemiddeld geheugengebruik met APM ingeschakeld over alle runtimes samen.",
+      "title": "APM Impact · App CPU Baseline",
+      "description": "Dezelfde container-CPU, maar verschoven met `${baseline_offset}` om een eerdere baseline-run zonder APM te vergelijken.",
       "gridPos": { "x": 6, "y": 124, "w": 6, "h": 4 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
           "refId": "A",
-          "expr": "((sum(rate(java_process_memory_used_mb_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(java_process_memory_used_mb_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(node_process_memory_rss_mb_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(node_process_memory_rss_mb_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(php_process_memory_rss_mb_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(php_process_memory_rss_mb_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(python_process_memory_rss_mb_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(python_process_memory_rss_mb_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9))) - ((sum(rate(java_process_memory_used_mb_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(java_process_memory_used_mb_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(node_process_memory_rss_mb_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(node_process_memory_rss_mb_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(php_process_memory_rss_mb_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(php_process_memory_rss_mb_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(python_process_memory_rss_mb_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(python_process_memory_rss_mb_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)))",
+          "expr": "100 * sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}[$__rate_interval] offset ${baseline_offset}))",
+          "instant": true,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 20 },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 120,
+      "type": "stat",
+      "title": "APM Impact · CPU Verschil t.o.v. Baseline",
+      "description": "Positief betekent meer app-CPU in de huidige APM-run dan in de eerdere baseline-run.",
+      "gridPos": { "x": 12, "y": 124, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(100 * sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}[$__rate_interval]))) - (100 * sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}[$__rate_interval] offset ${baseline_offset})))",
+          "instant": true,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 15 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 121,
+      "type": "stat",
+      "title": "APM Impact · Geheugen Verschil t.o.v. Baseline",
+      "description": "Positief betekent meer app-geheugen in de huidige APM-run dan in de eerdere baseline-run.",
+      "gridPos": { "x": 18, "y": 124, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(container_memory_working_set_bytes{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}) - sum(container_memory_working_set_bytes{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"} offset ${baseline_offset})) / 1000000",
           "instant": true,
           "range": true
         }
@@ -859,70 +921,8 @@
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "orange", "value": 25 },
-              { "color": "red", "value": 100 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "colorMode": "value", "graphMode": "area" }
-    },
-    {
-      "id": 120,
-      "type": "stat",
-      "title": "APM Impact · Latency Delta vs Zonder APM",
-      "description": "Vergelijkt de gemiddelde requestduur van de run met APM met de baseline zonder APM.",
-      "gridPos": { "x": 12, "y": 124, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "((sum(rate(java_request_duration_ms_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(java_request_duration_ms_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(node_request_duration_ms_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(node_request_duration_ms_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(php_request_duration_ms_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(php_request_duration_ms_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum(rate(python_request_duration_ms_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum(rate(python_request_duration_ms_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9))) - ((sum(rate(java_request_duration_ms_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(java_request_duration_ms_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(node_request_duration_ms_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(node_request_duration_ms_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(php_request_duration_ms_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(php_request_duration_ms_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum(rate(python_request_duration_ms_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum(rate(python_request_duration_ms_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)))",
-          "instant": true,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 25 },
-              { "color": "red", "value": 100 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "colorMode": "value", "graphMode": "area" }
-    },
-    {
-      "id": 121,
-      "type": "stat",
-      "title": "APM Impact · Throughput Delta vs Zonder APM",
-      "description": "Controlepaneel om te verifiëren dat de workload tussen beide runs vergelijkbaar was.",
-      "gridPos": { "x": 18, "y": 124, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "((sum(rate(java_requests_total{customapp_apm_enabled=\"true\"}[$__rate_interval])) + sum(rate(node_requests_total{customapp_apm_enabled=\"true\"}[$__rate_interval])) + sum(rate(php_requests_total{customapp_apm_enabled=\"true\"}[$__rate_interval])) + sum(rate(python_requests_total{customapp_apm_enabled=\"true\"}[$__rate_interval]))) - (sum(rate(java_requests_total{customapp_apm_enabled=\"false\"}[$__rate_interval])) + sum(rate(node_requests_total{customapp_apm_enabled=\"false\"}[$__rate_interval])) + sum(rate(php_requests_total{customapp_apm_enabled=\"false\"}[$__rate_interval])) + sum(rate(python_requests_total{customapp_apm_enabled=\"false\"}[$__rate_interval]))))",
-          "instant": true,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 2 },
-              { "color": "red", "value": 10 }
+              { "color": "orange", "value": 50 },
+              { "color": "red", "value": 150 }
             ]
           }
         },
@@ -933,20 +933,20 @@
     {
       "id": 122,
       "type": "timeseries",
-      "title": "APM Impact · CPU Gebruik per Meetrun",
-      "description": "Vergelijk de totale CPU-footprint van runs zonder APM en met APM via het label customapp_measurement_run.",
+      "title": "APM Impact · App CPU Nu vs Baseline",
+      "description": "Vergelijk de huidige APM-run met de baseline door de baseline met `${baseline_offset}` terug te schuiven.",
       "gridPos": { "x": 0, "y": 128, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum by (customapp_measurement_run) (rate(java_process_cpu_percent_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(java_process_cpu_percent_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(node_process_cpu_percent_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(node_process_cpu_percent_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(php_process_cpu_percent_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(php_process_cpu_percent_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(python_process_cpu_percent_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(python_process_cpu_percent_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9))",
-          "legendFormat": "{{customapp_measurement_run}} | APM aan"
+          "expr": "100 * sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}[$__rate_interval]))",
+          "legendFormat": "Huidige run"
         },
         {
           "refId": "B",
-          "expr": "(sum by (customapp_measurement_run) (rate(java_process_cpu_percent_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(java_process_cpu_percent_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(node_process_cpu_percent_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(node_process_cpu_percent_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(php_process_cpu_percent_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(php_process_cpu_percent_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(python_process_cpu_percent_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(python_process_cpu_percent_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9))",
-          "legendFormat": "{{customapp_measurement_run}} | APM uit"
+          "expr": "100 * sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}[$__rate_interval] offset ${baseline_offset}))",
+          "legendFormat": "Baseline (${baseline_offset} geleden)"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
@@ -955,20 +955,20 @@
     {
       "id": 123,
       "type": "timeseries",
-      "title": "APM Impact · Geheugengebruik per Meetrun",
-      "description": "Vergelijk de totale memory-footprint van runs zonder APM en met APM via hetzelfde meetrun-label.",
+      "title": "APM Impact · App Geheugen Nu vs Baseline",
+      "description": "Vergelijk container memory van de APM-run met een eerdere baseline-run zonder app-telemetrie.",
       "gridPos": { "x": 12, "y": 128, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum by (customapp_measurement_run) (rate(java_process_memory_used_mb_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(java_process_memory_used_mb_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(node_process_memory_rss_mb_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(node_process_memory_rss_mb_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(php_process_memory_rss_mb_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(php_process_memory_rss_mb_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(python_process_memory_rss_mb_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(python_process_memory_rss_mb_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9))",
-          "legendFormat": "{{customapp_measurement_run}} | APM aan"
+          "expr": "sum(container_memory_working_set_bytes{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}) / 1000000",
+          "legendFormat": "Huidige run"
         },
         {
           "refId": "B",
-          "expr": "(sum by (customapp_measurement_run) (rate(java_process_memory_used_mb_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(java_process_memory_used_mb_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(node_process_memory_rss_mb_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(node_process_memory_rss_mb_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(php_process_memory_rss_mb_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(php_process_memory_rss_mb_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(python_process_memory_rss_mb_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(python_process_memory_rss_mb_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9))",
-          "legendFormat": "{{customapp_measurement_run}} | APM uit"
+          "expr": "sum(container_memory_working_set_bytes{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"} offset ${baseline_offset}) / 1000000",
+          "legendFormat": "Baseline (${baseline_offset} geleden)"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
@@ -977,45 +977,45 @@
     {
       "id": 124,
       "type": "timeseries",
-      "title": "APM Impact · Gemiddelde Requestduur per Meetrun",
-      "description": "Laat zien of de applicatie merkbaar trager wordt zodra APM aan staat.",
+      "title": "APM Impact · CPU per Service Nu vs Baseline",
+      "description": "Per applicatieservice zie je of de APM-run meer CPU vraagt dan de baseline-run.",
       "gridPos": { "x": 0, "y": 136, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum by (customapp_measurement_run) (rate(java_request_duration_ms_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(java_request_duration_ms_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(node_request_duration_ms_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(node_request_duration_ms_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(php_request_duration_ms_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(php_request_duration_ms_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(python_request_duration_ms_sum{customapp_apm_enabled=\"true\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(python_request_duration_ms_count{customapp_apm_enabled=\"true\"}[$__rate_interval])), 1e-9))",
-          "legendFormat": "{{customapp_measurement_run}} | APM aan"
+          "expr": "100 * sum by (container_label_com_docker_compose_service) (rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{container_label_com_docker_compose_service}} | huidig"
         },
         {
           "refId": "B",
-          "expr": "(sum by (customapp_measurement_run) (rate(java_request_duration_ms_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(java_request_duration_ms_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(node_request_duration_ms_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(node_request_duration_ms_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(php_request_duration_ms_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(php_request_duration_ms_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9)) + (sum by (customapp_measurement_run) (rate(python_request_duration_ms_sum{customapp_apm_enabled=\"false\"}[$__rate_interval])) / clamp_min(sum by (customapp_measurement_run) (rate(python_request_duration_ms_count{customapp_apm_enabled=\"false\"}[$__rate_interval])), 1e-9))",
-          "legendFormat": "{{customapp_measurement_run}} | APM uit"
+          "expr": "100 * sum by (container_label_com_docker_compose_service) (rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}[$__rate_interval] offset ${baseline_offset}))",
+          "legendFormat": "{{container_label_com_docker_compose_service}} | baseline"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 125,
       "type": "timeseries",
-      "title": "APM Impact · Throughput per Meetrun",
-      "description": "Gebruik dit paneel om te controleren of beide testruns ongeveer dezelfde belasting hadden.",
+      "title": "APM Impact · Geheugen per Service Nu vs Baseline",
+      "description": "Per applicatieservice zie je of de APM-run meer geheugen vraagt dan de baseline-run.",
       "gridPos": { "x": 12, "y": 136, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (customapp_measurement_run) (rate(java_requests_total{customapp_apm_enabled=\"true\"}[$__rate_interval])) + sum by (customapp_measurement_run) (rate(node_requests_total{customapp_apm_enabled=\"true\"}[$__rate_interval])) + sum by (customapp_measurement_run) (rate(php_requests_total{customapp_apm_enabled=\"true\"}[$__rate_interval])) + sum by (customapp_measurement_run) (rate(python_requests_total{customapp_apm_enabled=\"true\"}[$__rate_interval]))",
-          "legendFormat": "{{customapp_measurement_run}} | APM aan"
+          "expr": "sum by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"}) / 1000000",
+          "legendFormat": "{{container_label_com_docker_compose_service}} | huidig"
         },
         {
           "refId": "B",
-          "expr": "sum by (customapp_measurement_run) (rate(java_requests_total{customapp_apm_enabled=\"false\"}[$__rate_interval])) + sum by (customapp_measurement_run) (rate(node_requests_total{customapp_apm_enabled=\"false\"}[$__rate_interval])) + sum by (customapp_measurement_run) (rate(php_requests_total{customapp_apm_enabled=\"false\"}[$__rate_interval])) + sum by (customapp_measurement_run) (rate(python_requests_total{customapp_apm_enabled=\"false\"}[$__rate_interval]))",
-          "legendFormat": "{{customapp_measurement_run}} | APM uit"
+          "expr": "sum by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_service=~\"php-storefront|node-catalog|python-recommendation|java-checkout\",image!=\"\"} offset ${baseline_offset}) / 1000000",
+          "legendFormat": "{{container_label_com_docker_compose_service}} | baseline"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     }
   ],
@@ -1033,7 +1033,23 @@
     "grafana"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "baseline_offset",
+        "label": "Baseline Offset",
+        "type": "custom",
+        "query": "30m,1h,6h,24h",
+        "current": {
+          "selected": true,
+          "text": "1h",
+          "value": "1h"
+        },
+        "includeAll": false,
+        "multi": false,
+        "options": [],
+        "refresh": 1
+      }
+    ]
   },
   "time": {
     "from": "now-6h",
@@ -1043,6 +1059,6 @@
   "timezone": "browser",
   "title": "CustomApp - Observability & APM Impact",
   "uid": "customapp-observability-deep-dive",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }
