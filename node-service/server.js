@@ -20,12 +20,18 @@ const slowLogThresholdMs = Math.max(50, Number(process.env.APP_SLOW_LOG_THRESHOL
 const resourceSampleIntervalMs = Math.max(5000, Number(process.env.APP_RESOURCE_SAMPLE_INTERVAL_MS || '10000'));
 const resourceWarnCpuPercent = Math.max(1, Number(process.env.APP_RESOURCE_WARN_CPU_PERCENT || '35'));
 const resourceWarnMemoryMb = Math.max(32, Number(process.env.APP_RESOURCE_WARN_MEMORY_MB || '180'));
+const measurementRun = process.env.CUSTOMAPP_MEASUREMENT_RUN || 'apm-on';
+const apmEnabled = (process.env.CUSTOMAPP_APM_ENABLED || 'true').toLowerCase() === 'true' ? 'true' : 'false';
+const apmProfile = process.env.CUSTOMAPP_APM_PROFILE || (apmEnabled === 'true' ? 'with-apm' : 'without-apm');
 
 const sdk = new NodeSDK({
   resource: new Resource({
     'service.name': serviceName,
     'service.namespace': 'openobserve-poc',
     'deployment.environment': 'poc',
+    'customapp_measurement_run': measurementRun,
+    'customapp_apm_enabled': apmEnabled,
+    'customapp_apm_profile': apmProfile,
   }),
   traceExporter: new OTLPTraceExporter({ url: otlpEndpoint, credentials: undefined }),
   metricReader: new PeriodicExportingMetricReader({
@@ -131,6 +137,9 @@ function log(severity, message, context = {}) {
     severity,
     'service.name': serviceName,
     message,
+    customapp_measurement_run: measurementRun,
+    customapp_apm_enabled: apmEnabled,
+    customapp_apm_profile: apmProfile,
     trace_id: spanContext ? spanContext.traceId : '',
     span_id: spanContext ? spanContext.spanId : '',
     context,

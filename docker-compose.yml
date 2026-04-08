@@ -7,6 +7,9 @@ services:
       - "8080:8080"
     environment:
       APP_ENV: poc
+      CUSTOMAPP_MEASUREMENT_RUN: ${CUSTOMAPP_MEASUREMENT_RUN:-apm-on}
+      CUSTOMAPP_APM_ENABLED: ${CUSTOMAPP_APM_ENABLED:-true}
+      CUSTOMAPP_APM_PROFILE: ${CUSTOMAPP_APM_PROFILE:-with-apm}
       APP_SERVICE_NAME: php-storefront
       APP_PORT: "8080"
       APP_LOG_FILE: /var/telemetry-logs/php-storefront.log
@@ -32,7 +35,7 @@ services:
       PYTHON_SERVICE_URL: http://python-recommendation:8000
       JAVA_SERVICE_URL: http://java-checkout:8081
       OTEL_EXPORTER_OTLP_HTTP_ENDPOINT: http://otel-collector:4318
-      OTEL_RESOURCE_ATTRIBUTES: service.name=php-storefront,service.namespace=openobserve-poc,deployment.environment=poc
+      OTEL_RESOURCE_ATTRIBUTES: service.name=php-storefront,service.namespace=openobserve-poc,deployment.environment=poc,customapp_measurement_run=${CUSTOMAPP_MEASUREMENT_RUN:-apm-on},customapp_apm_enabled=${CUSTOMAPP_APM_ENABLED:-true},customapp_apm_profile=${CUSTOMAPP_APM_PROFILE:-with-apm}
       APP_DB_BOTTLENECK_MODE: "true"
       APP_DB_BOTTLENECK_LOOPS: "12"
       APP_REDIS_BOTTLENECK_LOOPS: "30"
@@ -54,6 +57,9 @@ services:
       context: ./python-service
     container_name: python-recommendation
     environment:
+      CUSTOMAPP_MEASUREMENT_RUN: ${CUSTOMAPP_MEASUREMENT_RUN:-apm-on}
+      CUSTOMAPP_APM_ENABLED: ${CUSTOMAPP_APM_ENABLED:-true}
+      CUSTOMAPP_APM_PROFILE: ${CUSTOMAPP_APM_PROFILE:-with-apm}
       APP_SERVICE_NAME: python-recommendation
       APP_PORT: "8000"
       APP_LOG_FILE: /var/telemetry-logs/python-recommendation.log
@@ -94,6 +100,9 @@ services:
       context: ./node-service
     container_name: node-catalog
     environment:
+      CUSTOMAPP_MEASUREMENT_RUN: ${CUSTOMAPP_MEASUREMENT_RUN:-apm-on}
+      CUSTOMAPP_APM_ENABLED: ${CUSTOMAPP_APM_ENABLED:-true}
+      CUSTOMAPP_APM_PROFILE: ${CUSTOMAPP_APM_PROFILE:-with-apm}
       APP_SERVICE_NAME: node-catalog
       APP_PORT: "3000"
       APP_LOG_FILE: /var/telemetry-logs/node-catalog.log
@@ -127,6 +136,9 @@ services:
       context: ./java-service
     container_name: java-checkout
     environment:
+      CUSTOMAPP_MEASUREMENT_RUN: ${CUSTOMAPP_MEASUREMENT_RUN:-apm-on}
+      CUSTOMAPP_APM_ENABLED: ${CUSTOMAPP_APM_ENABLED:-true}
+      CUSTOMAPP_APM_PROFILE: ${CUSTOMAPP_APM_PROFILE:-with-apm}
       APP_SERVICE_NAME: java-checkout
       APP_PORT: "8081"
       APP_LOG_FILE: /var/telemetry-logs/java-checkout.log
@@ -222,6 +234,9 @@ services:
     environment:
       TARGET_URL: http://php-storefront:8080
       LOCUST_UI_URL: http://load-generator:8089
+      CUSTOMAPP_MEASUREMENT_RUN: ${CUSTOMAPP_MEASUREMENT_RUN:-apm-on}
+      CUSTOMAPP_APM_ENABLED: ${CUSTOMAPP_APM_ENABLED:-true}
+      CUSTOMAPP_APM_PROFILE: ${CUSTOMAPP_APM_PROFILE:-with-apm}
       BROWSER_CONCURRENCY: "3"
       BROWSER_USERS_PER_WORKER: "25"
       LOCUST_POLL_INTERVAL_MS: "5000"

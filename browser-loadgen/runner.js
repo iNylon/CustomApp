@@ -12,6 +12,9 @@ const rumErrorDelayMs = Math.max(1000, Number(process.env.RUM_ERROR_DELAY_MS || 
 const faultEvery = Math.max(1, Number(process.env.FAULT_EVERY_N || '2'));
 const loginEmail = (process.env.RUM_LOGIN_EMAIL || 'dylan@dylan123.nl').trim().toLowerCase();
 const loginPassword = process.env.RUM_LOGIN_PASSWORD || 'dylan123';
+const measurementRun = process.env.CUSTOMAPP_MEASUREMENT_RUN || 'apm-on';
+const apmEnabled = (process.env.CUSTOMAPP_APM_ENABLED || 'true').toLowerCase() === 'true';
+const apmProfile = process.env.CUSTOMAPP_APM_PROFILE || (apmEnabled ? 'with-apm' : 'without-apm');
 
 const faultTargets = ['mysql', 'postgres', 'redis', 'php', 'python', 'java', 'nodejs'];
 let desiredActiveWorkers = 0;
@@ -24,6 +27,9 @@ function log(message, context = {}) {
   console.log(JSON.stringify({
     timestamp: new Date().toISOString(),
     message,
+    customapp_measurement_run: measurementRun,
+    customapp_apm_enabled: apmEnabled,
+    customapp_apm_profile: apmProfile,
     context,
   }));
 }
@@ -248,6 +254,9 @@ async function main() {
     rum_error_delay_ms: rumErrorDelayMs,
     fault_every_n: faultEvery,
     login_email: loginEmail,
+    customapp_measurement_run: measurementRun,
+    customapp_apm_enabled: apmEnabled,
+    customapp_apm_profile: apmProfile,
   });
 
   await fetchLocustState();

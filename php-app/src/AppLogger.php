@@ -10,6 +10,7 @@ final class AppLogger
     public function __construct(
         private readonly string $serviceName,
         private readonly string $logFile,
+        private readonly array $defaultContext = [],
     ) {
     }
 
@@ -43,6 +44,7 @@ final class AppLogger
 
     public function write(string $severity, string $message, array $context = []): void
     {
+        $context = array_merge($this->defaultContext, $context);
         $traceId = (string) ($context['trace_id'] ?? $this->traceContext['trace_id'] ?? '');
         $spanId = (string) ($context['span_id'] ?? $this->traceContext['span_id'] ?? '');
         $requestId = (string) ($context['request_id'] ?? $this->requestId);
@@ -64,6 +66,10 @@ final class AppLogger
             'message' => $message,
             'context' => $context,
         ];
+
+        foreach ($this->defaultContext as $key => $value) {
+            $entry[(string) $key] = $value;
+        }
 
         $entry['trace_id'] = $traceId;
         $entry['span_id'] = $spanId;

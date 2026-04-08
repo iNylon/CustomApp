@@ -14,15 +14,23 @@ require_once __DIR__ . '/../src/OtlpHttpEmitter.php';
 
 $serviceName = getenv('APP_SERVICE_NAME') ?: 'php-storefront';
 $logFile = getenv('APP_LOG_FILE') ?: '/tmp/php-storefront.log';
+$measurementRun = getenv('CUSTOMAPP_MEASUREMENT_RUN') ?: 'apm-on';
+$apmEnabled = filter_var(getenv('CUSTOMAPP_APM_ENABLED') ?: 'true', FILTER_VALIDATE_BOOLEAN) ? 'true' : 'false';
+$apmProfile = getenv('CUSTOMAPP_APM_PROFILE') ?: ($apmEnabled === 'true' ? 'with-apm' : 'without-apm');
+$measurementContext = [
+    'customapp_measurement_run' => $measurementRun,
+    'customapp_apm_enabled' => $apmEnabled,
+    'customapp_apm_profile' => $apmProfile,
+];
 $emitter = new OtlpHttpEmitter(
     getenv('OTEL_EXPORTER_OTLP_HTTP_ENDPOINT') ?: 'http://otel-collector:4318',
-    [
+    array_merge([
         'service.name' => $serviceName,
         'service.namespace' => 'openobserve-poc',
         'deployment.environment' => getenv('APP_ENV') ?: 'poc',
-    ]
+    ], $measurementContext)
 );
-$logger = new AppLogger($serviceName, $logFile);
+$logger = new AppLogger($serviceName, $logFile, $measurementContext);
 
 $requestStart = microtime(true);
 $requestId = $_SERVER['HTTP_X_REQUEST_ID'] ?? ('req-' . bin2hex(random_bytes(8)));

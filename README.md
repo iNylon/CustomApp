@@ -70,6 +70,7 @@ Beschikbare endpoints:
 - Alle services schrijven structured logs naar `/var/telemetry-logs/*.log`, die door de collector worden ingelezen.
 - Een Grafana-dashboard voor deze opzet staat in [`grafana/customapp-observability-deep-dive.json`](/Users/dylan/CustomApp/grafana/customapp-observability-deep-dive.json).
 - Naast `load-generator` draait ook `rum-browser-runner`, een echte headless browser die synthetische storefront-sessies opbouwt zodat OpenObserve RUM sessies, interacties en browser-errors kan registreren.
+- Alle runtimes labelen metrics, traces en logs nu ook met `customapp_measurement_run`, `customapp_apm_enabled` en `customapp_apm_profile`, zodat je baseline-runs en APM-runs in Grafana direct naast elkaar kunt vergelijken.
 
 ## Synthetische RUM-sessies
 
@@ -104,6 +105,23 @@ In OpenObserve RUM kun je deze sessies herkennen via de synthetic user context:
 
 Daardoor kun je echte browsergedreven RUM-data bekijken naast de backend-load uit Locust.
 De runner schaalt nu ook terug naar nul als Locust niet actief is of `user_count = 0`, zodat er niet los van Locust browser-sessies blijven binnenkomen.
+
+## APM-impact meten in Grafana
+
+Voor de requirement "De APM-oplossing moet inzicht bieden in de impact van monitoring op resourcegebruik van de applicatie" kun je nu twee meetruns uitvoeren met dezelfde load:
+
+- zonder APM: `CUSTOMAPP_MEASUREMENT_RUN=baseline-no-apm CUSTOMAPP_APM_ENABLED=false CUSTOMAPP_APM_PROFILE=without-apm docker compose up --build`
+- met APM: `CUSTOMAPP_MEASUREMENT_RUN=apm-on CUSTOMAPP_APM_ENABLED=true CUSTOMAPP_APM_PROFILE=with-apm docker compose up --build`
+
+Het dashboard [`grafana/customapp-observability-deep-dive.json`](/Users/dylan/CustomApp/grafana/customapp-observability-deep-dive.json) bevat hiervoor een aparte sectie `APM Impact` met:
+
+- CPU delta versus zonder APM
+- memory delta versus zonder APM
+- latency delta versus zonder APM
+- throughput-controle om te checken dat beide runs vergelijkbare load hadden
+- tijdseries per meetrun voor CPU, memory, requestduur en throughput
+
+Daardoor kun je in één dashboard zichtbaar maken of extra monitoring leidt tot hoger resourcegebruik of slechtere applicatieprestatie.
 
 ## Requirement: bottlenecks visueel inzichtelijk
 

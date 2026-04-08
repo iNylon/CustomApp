@@ -55,6 +55,9 @@ public final class App {
   private static final long RESOURCE_SAMPLE_INTERVAL_MS = Long.parseLong(System.getenv().getOrDefault("APP_RESOURCE_SAMPLE_INTERVAL_MS", "10000"));
   private static final double RESOURCE_WARN_CPU_PERCENT = Double.parseDouble(System.getenv().getOrDefault("APP_RESOURCE_WARN_CPU_PERCENT", "35"));
   private static final double RESOURCE_WARN_MEMORY_MB = Double.parseDouble(System.getenv().getOrDefault("APP_RESOURCE_WARN_MEMORY_MB", "180"));
+  private static final String MEASUREMENT_RUN = System.getenv().getOrDefault("CUSTOMAPP_MEASUREMENT_RUN", "apm-on");
+  private static final String APM_ENABLED = "true".equalsIgnoreCase(System.getenv().getOrDefault("CUSTOMAPP_APM_ENABLED", "true")) ? "true" : "false";
+  private static final String APM_PROFILE = System.getenv().getOrDefault("CUSTOMAPP_APM_PROFILE", "true".equals(APM_ENABLED) ? "with-apm" : "without-apm");
   private static final Random RANDOM = new Random();
   private static final OperatingSystemMXBean OS_BEAN = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
   private static final TextMapGetter<Headers> HEADER_GETTER = new TextMapGetter<>() {
@@ -84,6 +87,9 @@ public final class App {
         .put("service.name", SERVICE_NAME)
         .put("service.namespace", "openobserve-poc")
         .put("deployment.environment", "poc")
+        .put("customapp_measurement_run", MEASUREMENT_RUN)
+        .put("customapp_apm_enabled", APM_ENABLED)
+        .put("customapp_apm_profile", APM_PROFILE)
         .build()));
 
     SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
@@ -355,11 +361,14 @@ public final class App {
     String traceId = spanContext.isValid() ? spanContext.getTraceId() : "";
     String spanId = spanContext.isValid() ? spanContext.getSpanId() : "";
     String entry = String.format(
-      "{\"timestamp\":\"%s\",\"severity\":\"%s\",\"service.name\":\"%s\",\"message\":\"%s\",\"trace_id\":\"%s\",\"span_id\":\"%s\",\"context\":%s}%n",
+      "{\"timestamp\":\"%s\",\"severity\":\"%s\",\"service.name\":\"%s\",\"message\":\"%s\",\"customapp_measurement_run\":\"%s\",\"customapp_apm_enabled\":\"%s\",\"customapp_apm_profile\":\"%s\",\"trace_id\":\"%s\",\"span_id\":\"%s\",\"context\":%s}%n",
         Instant.now(),
         severity,
         SERVICE_NAME,
         message.replace("\"", "'"),
+        MEASUREMENT_RUN,
+        APM_ENABLED,
+        APM_PROFILE,
         traceId,
         spanId,
         mapToJson(context));

@@ -43,12 +43,18 @@ NODE_SERVICE_URL = os.getenv("NODE_SERVICE_URL", "http://node-catalog:3000").rst
 JAVA_SERVICE_URL = os.getenv("JAVA_SERVICE_URL", "http://java-checkout:8081").rstrip("/")
 SYNTHETIC_USER_EMAIL = os.getenv("APP_SYNTHETIC_USER_EMAIL", "telemetry-bot@example.com").strip().lower()
 SYNTHETIC_USER_PASSWORD = os.getenv("APP_SYNTHETIC_USER_PASSWORD", "TelemetryBot!2026")
+MEASUREMENT_RUN = os.getenv("CUSTOMAPP_MEASUREMENT_RUN", "apm-on")
+APM_ENABLED = "true" if os.getenv("CUSTOMAPP_APM_ENABLED", "true").lower() == "true" else "false"
+APM_PROFILE = os.getenv("CUSTOMAPP_APM_PROFILE", "with-apm" if APM_ENABLED == "true" else "without-apm")
 
 resource = Resource.create(
     {
         "service.name": SERVICE_NAME,
         "service.namespace": "openobserve-poc",
         "deployment.environment": "poc",
+        "customapp_measurement_run": MEASUREMENT_RUN,
+        "customapp_apm_enabled": APM_ENABLED,
+        "customapp_apm_profile": APM_PROFILE,
     }
 )
 
@@ -88,6 +94,9 @@ def log(severity: str, message: str, **context):
         "severity": severity,
         "service.name": SERVICE_NAME,
         "message": message,
+        "customapp_measurement_run": MEASUREMENT_RUN,
+        "customapp_apm_enabled": APM_ENABLED,
+        "customapp_apm_profile": APM_PROFILE,
         "trace_id": trace_id,
         "span_id": span_id,
         "context": context,
