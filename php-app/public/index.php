@@ -548,34 +548,34 @@ function probeStep(string $name, callable $operation, AppLogger $logger, OtlpHtt
     $data = $operation($span, $appSpan);
       $telemetry = extractProbeTelemetry($data);
 
-        $emitter->exportTrace($emitter->finishSpan($span, array_merge([
+        $emitter->exportTrace($emitter->finishSpan($span, withPhpSpanResourceAttributes(array_merge([
             'component.name' => $name,
             'component.ok' => true,
             'duration_ms' => elapsedMs($start),
-        ], $extraAttributes, $telemetry)));
-        $emitter->exportTrace($emitter->finishSpan($appSpan, array_merge([
+        ], $extraAttributes, $telemetry), 'component')));
+        $emitter->exportTrace($emitter->finishSpan($appSpan, withPhpSpanResourceAttributes(array_merge([
             'component.name' => $name,
             'component.ok' => true,
             'duration_ms' => elapsedMs($start),
-        ], $telemetry)));
+        ], $telemetry), 'application')));
 
         return ['ok' => true, 'data' => stripProbeTelemetry($data)];
     } catch (Throwable $error) {
         $message = $error->getMessage();
       $errorContext = describeThrowable($error);
 
-        $emitter->exportTrace($emitter->finishSpan($span, array_merge([
+        $emitter->exportTrace($emitter->finishSpan($span, withPhpSpanResourceAttributes(array_merge([
             'component.name' => $name,
             'component.ok' => false,
             'duration_ms' => elapsedMs($start),
             'error' => true,
-      ], $extraAttributes, $errorContext), true, $message));
-        $emitter->exportTrace($emitter->finishSpan($appSpan, array_merge([
+      ], $extraAttributes, $errorContext), 'component'), true, $message));
+        $emitter->exportTrace($emitter->finishSpan($appSpan, withPhpSpanResourceAttributes(array_merge([
             'component.name' => $name,
             'component.ok' => false,
             'duration_ms' => elapsedMs($start),
             'error' => true,
-        ], $errorContext), true, $message));
+        ], $errorContext), 'application'), true, $message));
 
         $emitter->exportMetrics([
             $emitter->counter('php_component_errors_total', 1, ['component' => $name]),
@@ -626,14 +626,14 @@ function traceDatabaseStep(?OtlpHttpEmitter $emitter, ?array $parentSpan, string
 
     try {
         $result = $operation();
-        $emitter->exportTrace($emitter->finishSpan($span, [
+        $emitter->exportTrace($emitter->finishSpan($span, withPhpSpanResourceAttributes([
             'duration_ms' => round((microtime(true) - $stepStart) * 1000, 2),
-        ]));
+        ], 'database_step')));
         return $result;
     } catch (Throwable $error) {
-        $emitter->exportTrace($emitter->finishSpan($span, array_merge([
+        $emitter->exportTrace($emitter->finishSpan($span, withPhpSpanResourceAttributes(array_merge([
             'duration_ms' => round((microtime(true) - $stepStart) * 1000, 2),
-        ], describeThrowable($error)), true, $error->getMessage()));
+        ], describeThrowable($error)), 'database_step'), true, $error->getMessage()));
         throw $error;
     }
 }
@@ -2763,7 +2763,7 @@ function finishRootSpan(OtlpHttpEmitter $emitter, array $rootSpan, string $path,
     'request.id' => $requestId,
     ];
 
-    $emitter->exportTrace($emitter->finishSpan($rootSpan, array_merge($baseAttributes, $attributes), $error));
+    $emitter->exportTrace($emitter->finishSpan($rootSpan, withPhpSpanResourceAttributes(array_merge($baseAttributes, $attributes), 'request', $path, $status), $error));
 }
 
 function finalize(string $path, int $status, float $requestStart, AppLogger $logger, OtlpHttpEmitter $emitter, array $rootSpan, string $message, array $extraAttributes = []): void
@@ -2784,13 +2784,13 @@ function finalize(string $path, int $status, float $requestStart, AppLogger $log
     ]);
 
     $span = $emitter->startSpan('php.finalize', ['http.route' => $path], $rootSpan);
-    $emitter->exportTrace($emitter->finishSpan($span, array_merge([
+    $emitter->exportTrace($emitter->finishSpan($span, withPhpSpanResourceAttributes(array_merge([
         'http.status_code' => $status,
         'http.route' => $path,
         'http.method' => $_SERVER['REQUEST_METHOD'] ?? 'GET',
         'duration_ms' => $latency,
         'request.id' => $requestId,
-    ], $extraAttributes), $status >= 500));
+    ], $extraAttributes), 'finalize', $path, $status), $status >= 500));
 
     $metrics = [
         $emitter->counter('php_requests_total', 1, ['route' => $path, 'status' => $status]),
@@ -2847,6 +2847,21 @@ function emitPhpProcessResourceTelemetry(string $path, int $status, AppLogger $l
     }
 
     return $snapshot;
+}
+
+function withPhpSpanResourceAttributes(array $attributes, string $scope = 'span', string $route = '', int $status = 0): array
+{
+    $snapshot = samplePhpProcessResources();
+    $pid = getmypid();
+
+    return array_merge($attributes, [
+        'resource.scope' => $scope,
+        'resource.pid' => $pid === false ? 0 : $pid,
+        'resource.cpu_percent' => $snapshot['cpu_percent'],
+        'resource.memory_usage_mb' => $snapshot['memory_usage_mb'],
+        'resource.memory_peak_mb' => $snapshot['memory_peak_mb'],
+        'resource.memory_rss_mb' => $snapshot['memory_rss_mb'],
+    ], $route !== '' ? ['resource.route' => $route] : [], $status > 0 ? ['resource.status' => $status] : []);
 }
 
 function samplePhpProcessResources(): array
@@ -2976,12 +2991,12 @@ function triggerManualAlert(AppLogger $logger, OtlpHttpEmitter $emitter, array $
     ]),
   ]);
 
-  $emitter->exportTrace($emitter->finishSpan($span, [
+  $emitter->exportTrace($emitter->finishSpan($span, withPhpSpanResourceAttributes([
     'alert.name' => $alertName,
     'alert.source' => $source,
     'alert.triggered' => true,
     'alert.triggered_at' => $triggeredAt,
-  ]));
+  ], 'application')));
 
   $logger->warn('Manual alert trigger fired', [
     'request_id' => $requestId,
@@ -3026,10 +3041,10 @@ function triggerPhpFault(AppLogger $logger, OtlpHttpEmitter $emitter, array $roo
     throw new RuntimeException('php storefront failed while preparing checkout context');
   } catch (Throwable $error) {
     $errorContext = describeThrowable($error);
-    $emitter->exportTrace($emitter->finishSpan($span, array_merge([
+    $emitter->exportTrace($emitter->finishSpan($span, withPhpSpanResourceAttributes(array_merge([
       'component.ok' => false,
       'error' => true,
-    ], $errorContext), true, $error->getMessage()));
+    ], $errorContext), 'application'), true, $error->getMessage()));
     $logger->error('PHP fault triggered', [
       'error' => $error->getMessage(),
       'request_id' => $requestId,

@@ -132,10 +132,13 @@ def trace_step(name: str, attributes: dict, operation):
         for key, value in attributes.items():
             span.set_attribute(key, value)
         try:
-            return operation()
+            result = operation()
+            set_span_resource_attributes(span, "component")
+            return result
         except Exception as error:
             apply_error_attributes(span, error)
             span.set_status(Status(StatusCode.ERROR, str(error)))
+            set_span_resource_attributes(span, "component")
             raise
 
 
@@ -221,6 +224,21 @@ def sample_process_resources():
         "memory_rss_mb": memory_stats["rss_mb"],
         "memory_virtual_mb": memory_stats["virtual_mb"],
     }
+
+
+def set_span_resource_attributes(span, scope: str = "span", extra: Optional[dict] = None):
+    if span is None:
+        return None
+    snapshot = sample_process_resources()
+    span.set_attribute("resource.scope", scope)
+    span.set_attribute("resource.pid", snapshot["pid"])
+    span.set_attribute("resource.cpu_percent", snapshot["cpu_percent"])
+    span.set_attribute("resource.memory_rss_mb", snapshot["memory_rss_mb"])
+    span.set_attribute("resource.memory_virtual_mb", snapshot["memory_virtual_mb"])
+    for key, value in (extra or {}).items():
+        if value is not None and value != "":
+            span.set_attribute(f"resource.{key}", value)
+    return snapshot
 
 
 def record_process_resource_metrics(scope: str, route: str = "", status: Optional[int] = None, component: str = "runtime", emit_log: bool = False):
@@ -625,6 +643,7 @@ def recommendations():
                 payload = json.loads(cached)
                 payload["request_id"] = request._request_id
                 log("INFO", "served recommendations from cache", user_id=user_id, request_id=request._request_id)
+                set_span_resource_attributes(span, "request", {"route": "/recommendations", "status": 200})
                 return jsonify(payload)
 
             with trace_step(
@@ -820,12 +839,14 @@ def recommendations():
                 )
 
             log("INFO", "served recommendations from postgres", user_id=user_id, count=len(payload["items"]), request_id=request._request_id)
+            set_span_resource_attributes(span, "request", {"route": "/recommendations", "status": 200})
             return jsonify(payload)
         except Exception as error:
             error_counter.add(1, {"route": request.path})
             span.record_exception(error)
             apply_error_attributes(span, error)
             span.set_status(Status(StatusCode.ERROR, str(error)))
+            set_span_resource_attributes(span, "request", {"route": request.path, "status": 503})
             log(
                 "ERROR",
                 "python recommendations failed",

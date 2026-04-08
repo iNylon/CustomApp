@@ -135,6 +135,7 @@ public final class App {
       double durationMs = (System.nanoTime() - start) / 1_000_000.0;
       latencyHistogram.record(durationMs, requestAttributes("/healthz", 200));
       recordResourceMetrics(resourceCpuHistogram, resourceMemoryHistogram, resourceCommittedMemoryHistogram, "request", "/healthz", 200, false);
+      attachResourceAttributes(Span.current(), "request", "/healthz", 200);
       log("INFO", "java health served", Map.of("request_id", requestId, "status", 200, "duration_ms", roundDuration(durationMs)));
     });
 
@@ -198,6 +199,7 @@ public final class App {
         requestCounter.add(1, requestAttributes("/quote", statusCode[0]));
         latencyHistogram.record(durationMs, requestAttributes("/quote", statusCode[0]));
         recordResourceMetrics(resourceCpuHistogram, resourceMemoryHistogram, resourceCommittedMemoryHistogram, "request", "/quote", statusCode[0], false);
+        attachResourceAttributes(span, "request", "/quote", statusCode[0]);
         log("INFO", "java request complete", Map.of("path", "/quote", "status", statusCode[0], "duration_ms", roundDuration(durationMs), "request_id", requestId));
         if (durationMs >= SLOW_LOG_THRESHOLD_MS) {
           log("WARN", "java request exceeded slow threshold", Map.of("path", "/quote", "status", statusCode[0], "duration_ms", roundDuration(durationMs), "request_id", requestId));
@@ -260,11 +262,13 @@ public final class App {
         putSpanAttribute(span, entry.getKey(), entry.getValue());
       }
       T result = supplier.run();
+      attachResourceAttributes(span, "component", "", 0);
       span.end();
       return result;
     } catch (Exception error) {
       applyErrorAttributes(span, error, SERVICE_NAME, "infrastructure");
       span.setStatus(StatusCode.ERROR, error.getMessage());
+      attachResourceAttributes(span, "component", "", 0);
       span.end();
       throw error;
     }
@@ -329,6 +333,27 @@ public final class App {
       context.put("cpu_warn_percent", RESOURCE_WARN_CPU_PERCENT);
       context.put("memory_warn_mb", RESOURCE_WARN_MEMORY_MB);
       log(thresholdExceeded ? "WARN" : "INFO", thresholdExceeded ? "java resource threshold exceeded" : "java resource snapshot", context);
+    }
+  }
+
+  private static void attachResourceAttributes(Span span, String scope, String route, int statusCode) {
+    if (span == null) {
+      return;
+    }
+    Map<String, Double> memoryStats = memoryStatsMb();
+    double cpuPercent = processCpuPercent();
+    long pid = ProcessHandle.current().pid();
+    span.setAttribute("resource.scope", scope);
+    span.setAttribute("resource.pid", pid);
+    span.setAttribute("resource.cpu_percent", cpuPercent);
+    span.setAttribute("resource.memory_used_mb", memoryStats.get("used_mb"));
+    span.setAttribute("resource.memory_committed_mb", memoryStats.get("committed_mb"));
+    span.setAttribute("resource.memory_max_mb", memoryStats.get("max_mb"));
+    if (!route.isBlank()) {
+      span.setAttribute("resource.route", route);
+    }
+    if (statusCode > 0) {
+      span.setAttribute("resource.status", statusCode);
     }
   }
 

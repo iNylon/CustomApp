@@ -116,16 +116,37 @@ function generateRequestId() {
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function setSpanResourceAttributes(span, scope = 'span', extra = {}) {
+  if (!span) {
+    return null;
+  }
+
+  const snapshot = sampleProcessResources();
+  span.setAttribute('resource.scope', scope);
+  span.setAttribute('resource.pid', snapshot.pid);
+  span.setAttribute('resource.cpu_percent', snapshot.cpuPercent);
+  span.setAttribute('resource.memory_rss_mb', snapshot.memoryRssMb);
+  span.setAttribute('resource.heap_used_mb', snapshot.heapUsedMb);
+  Object.entries(extra).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      span.setAttribute(`resource.${key}`, value);
+    }
+  });
+  return snapshot;
+}
+
 async function traceStep(name, attributes, operation) {
   return tracer.startActiveSpan(name, async (span) => {
     Object.entries(attributes || {}).forEach(([key, value]) => span.setAttribute(key, value));
     try {
       const result = await operation(span);
+      setSpanResourceAttributes(span, 'component');
       span.end();
       return result;
     } catch (error) {
       applyErrorAttributes(span, error);
       span.setStatus({ code: 2, message: error.message });
+      setSpanResourceAttributes(span, 'component');
       span.end();
       throw error;
     }
@@ -201,6 +222,7 @@ function recordProcessResources(scope, extra = {}, emitLog = false) {
 
 app.use((req, res, next) => {
   req.requestId = req.get('x-request-id') || generateRequestId();
+  req.requestSpan = trace.getActiveSpan();
   res.setHeader('x-request-id', req.requestId);
 
   const start = performance.now();
@@ -210,6 +232,7 @@ app.use((req, res, next) => {
     requestCounter.add(1, attrs);
     latencyHistogram.record(duration, attrs);
     recordProcessResources('request', { route: req.path, status: res.statusCode });
+    setSpanResourceAttributes(req.requestSpan, 'request', { route: req.path, status: res.statusCode });
     log('INFO', 'node request complete', { path: req.path, status: res.statusCode, duration_ms: Number(duration.toFixed(2)), request_id: req.requestId });
     if (duration >= slowLogThresholdMs) {
       log('WARN', 'node request exceeded slow threshold', {
@@ -304,6 +327,7 @@ app.get('/inventory', async (req, res) => {
       });
       span.setAttribute('catalog.item_count', rows.length);
       span.setAttribute('catalog.waste_queries', wasteQueryCount);
+      setSpanResourceAttributes(span, 'request', { route: '/inventory', status: 200 });
       span.end();
     } catch (error) {
       errorCounter.add(1, { route: '/inventory' });
@@ -321,6 +345,7 @@ app.get('/inventory', async (req, res) => {
         ...(error.observabilityContext || {}),
       });
       res.status(503).json({ error: error.message, service: serviceName, request_id: req.requestId });
+      setSpanResourceAttributes(span, 'request', { route: '/inventory', status: 503 });
       span.end();
     }
   });
