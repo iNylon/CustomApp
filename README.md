@@ -27,6 +27,61 @@ De collector stuurt signalen naar aparte streams:
 
 Je kunt deze namen aanpassen in [`otel-collector-config.yaml`](/Users/dylan/CustomApp/otel-collector-config.yaml).
 
+## Betrouwbare verwerking bij piekbelasting
+
+De collector is nu expliciet ingericht om tijdelijke exportproblemen naar OpenObserve op te vangen:
+
+- `retry_on_failure` staat aan op alle O2-exporters in [`otel-collector-config.yaml`](/Users/dylan/CustomApp/otel-collector-config.yaml)
+- `sending_queue` staat aan op alle O2-exporters in [`otel-collector-config.yaml`](/Users/dylan/CustomApp/otel-collector-config.yaml)
+- de exporter-queue gebruikt persistente opslag via `file_storage`, ook in [`otel-collector-config.yaml`](/Users/dylan/CustomApp/otel-collector-config.yaml)
+- de collector bewaart deze queue op de volume mount `otelcol-file-storage` in [`docker-compose.yml`](/Users/dylan/CustomApp/docker-compose.yml)
+- export naar OpenObserve loopt via een lokale relay `o2-relay` in [`docker-compose.yml`](/Users/dylan/CustomApp/docker-compose.yml), zodat je storingen reproduceerbaar kunt simuleren zonder de collector uit te zetten
+
+Daarnaast exposeert de collector nu eigen Prometheus-metrics op `http://localhost:8888/metrics`. Daardoor kun je queue-groei en herstel zichtbaar maken via metrics zoals:
+
+- `otelcol_exporter_queue_size`
+- `otelcol_exporter_queue_capacity`
+- `otelcol_exporter_send_failed_*`
+- `otelcol_exporter_sent_*`
+
+## Loadtest voor queue-opbouw en herstel
+
+Er is een reproduceerbare test toegevoegd in [`run-collector-resilience-test.sh`](/Users/dylan/CustomApp/scripts/run-collector-resilience-test.sh).
+
+Deze test:
+
+- start de stack
+- start een headless Locust-loadtest
+- stopt tijdelijk `o2-relay` zodat export naar OpenObserve faalt terwijl de collector wel data blijft ontvangen
+- maakt collector-metric-snapshots voor, tijdens en na de storing
+- start `o2-relay` weer
+- wacht tot de exporter-queue is leeggelopen
+
+Uitvoeren:
+
+```bash
+chmod +x ./scripts/run-collector-resilience-test.sh
+./scripts/run-collector-resilience-test.sh
+```
+
+Optionele tuning:
+
+```bash
+USERS=200 SPAWN_RATE=40 TEST_DURATION=240s OUTAGE_AFTER_SECONDS=20 OUTAGE_DURATION_SECONDS=60 ./scripts/run-collector-resilience-test.sh
+```
+
+Resultaat:
+
+- Locust-output komt in `./artifacts/collector-resilience/locust.log`
+- collector-metric-snapshots komen in `./artifacts/collector-resilience/*.prom`
+
+Daarmee kun je aantonen:
+
+- dat de queue tijdens de storing oploopt
+- dat export tijdelijk faalt zonder dat de collector direct stopt met accepteren
+- dat de queue na herstel weer leegloopt
+- dat telemetrie later alsnog naar OpenObserve wordt afgeleverd
+
 ## Monitoring-intensiteit centraal regelen
 
 De intensiteit van telemetrie kun je centraal aanpassen in [`otel-collector-config.yaml`](/Users/dylan/CustomApp/otel-collector-config.yaml), zonder de app-services opnieuw te deployen:

@@ -210,15 +210,24 @@ services:
     volumes:
       - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
       - telemetry-logs:/var/telemetry-logs:ro
+      - otelcol-file-storage:/var/lib/otelcol/file_storage
     ports:
       - "4317:4317"
       - "4318:4318"
       - "13133:13133"
+      - "8888:8888"
     depends_on:
       - mysql
       - postgres
       - redis
       - cadvisor
+      - o2-relay
+
+  o2-relay:
+    image: nginx:1.27-alpine
+    container_name: poc-o2-relay
+    volumes:
+      - ./o2-relay/nginx.conf:/etc/nginx/nginx.conf:ro
 
   load-generator:
     build:
@@ -267,3 +276,4 @@ volumes:
   mysql-data:
   postgres-data:
   telemetry-logs:
+  otelcol-file-storage:

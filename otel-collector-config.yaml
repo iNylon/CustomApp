@@ -28,6 +28,15 @@ receivers:
             - targets:
                 - cadvisor:8080
 
+  prometheus/otelcol:
+    config:
+      scrape_configs:
+        - job_name: otelcol
+          scrape_interval: 5s
+          static_configs:
+            - targets:
+                - otel-collector:8888
+
 processors:
   memory_limiter:
     check_interval: 1s
@@ -80,32 +89,67 @@ processors:
 
 exporters:
   otlphttp/openobserve_traces:
-    endpoint: https://openobserve.dylanp.nl/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
+    endpoint: http://o2-relay/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
     headers:
       Authorization: Basic a2xhbnRAa2xhbnQubmw6WVJ6YmlJSXVuMndIeUJYWQ==
       stream-name: poc-traces
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      num_consumers: 8
+      queue_size: 20000
+      storage: file_storage
 
   otlphttp/openobserve_metrics:
-    endpoint: https://openobserve.dylanp.nl/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
+    endpoint: http://o2-relay/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
     headers:
       Authorization: Basic a2xhbnRAa2xhbnQubmw6WVJ6YmlJSXVuMndIeUJYWQ==
       stream-name: poc-metrics
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      num_consumers: 8
+      queue_size: 20000
+      storage: file_storage
 
   otlphttp/openobserve_logs:
-    endpoint: https://openobserve.dylanp.nl/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
+    endpoint: http://o2-relay/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
     headers:
       Authorization: Basic a2xhbnRAa2xhbnQubmw6WVJ6YmlJSXVuMndIeUJYWQ==
       stream-name: poc-logs
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      num_consumers: 8
+      queue_size: 20000
+      storage: file_storage
 
 extensions:
   health_check:
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
 
 service:
   telemetry:
+    metrics:
+      address: 0.0.0.0:8888
     logs:
       level: info
   extensions:
     - health_check
+    - file_storage
   pipelines:
     traces:
       receivers:
@@ -122,6 +166,7 @@ service:
       receivers:
         - otlp
         - prometheus/cadvisor
+        - prometheus/otelcol
       processors:
         - memory_limiter
         - filter/metrics
