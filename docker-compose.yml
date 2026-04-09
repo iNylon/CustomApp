@@ -205,6 +205,7 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.101.0
     container_name: poc-otel-collector
+    user: "0:0"
     command:
       - --config=/etc/otelcol-contrib/config.yaml
     volumes:
