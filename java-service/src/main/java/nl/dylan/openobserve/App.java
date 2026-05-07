@@ -59,7 +59,7 @@ public final class App {
   private static final String MEASUREMENT_RUN = System.getenv().getOrDefault("CUSTOMAPP_MEASUREMENT_RUN", "apm-on");
   private static final String APM_ENABLED = "true".equalsIgnoreCase(System.getenv().getOrDefault("CUSTOMAPP_APM_ENABLED", "true")) ? "true" : "false";
   private static final boolean APM_ENABLED_BOOL = "true".equals(APM_ENABLED);
-  private static final String APM_PROFILE = System.getenv().getOrDefault("CUSTOMAPP_APM_PROFILE", "true".equals(APM_ENABLED) ? "with-apm" : "without-apm");
+  private static final String APM_PROFILE = resolveApmProfile();
   private static final Random RANDOM = new Random();
   private static final OperatingSystemMXBean OS_BEAN = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
   private static final ThreadMXBean THREAD_BEAN = ManagementFactory.getThreadMXBean();
@@ -83,6 +83,14 @@ public final class App {
   };
 
   private App() {
+  }
+
+  private static String resolveApmProfile() {
+    String configuredProfile = System.getenv("CUSTOMAPP_APM_PROFILE");
+    if (configuredProfile != null && !configuredProfile.isBlank()) {
+      return configuredProfile;
+    }
+    return APM_ENABLED_BOOL ? "with-apm" : "without-apm";
   }
 
   public static void main(String[] args) throws IOException {

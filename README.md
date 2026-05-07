@@ -101,6 +101,47 @@ Voorbeelden:
 
 Let op: in deze repo worden metrics nu via OTLP push verstuurd, niet via scrape. Daardoor regel je metric-intensiteit hier centraal via filters en batching, niet via een scrape interval. Als je specifiek het scrape interval wilt kunnen aanpassen, moeten de services eerst scrape-bare Prometheus metrics exposen en moet de collector of Prometheus die endpoints scrapen.
 
+## Monitoring per service aan- of uitzetten
+
+De makkelijkste manier is via environment variables in [`docker-compose.yml`](/Users/dylan/CustomApp/docker-compose.yml). De globale schakelaar blijft bestaan:
+
+```bash
+CUSTOMAPP_APM_ENABLED=false docker compose up --build
+```
+
+Voor gerichte runs kun je per service overschrijven:
+
+```bash
+CUSTOMAPP_NODE_CATALOG_APM_ENABLED=false docker compose up --build
+```
+
+Beschikbare service-toggles:
+
+- `CUSTOMAPP_PHP_STOREFRONT_APM_ENABLED`
+- `CUSTOMAPP_NODE_CATALOG_APM_ENABLED`
+- `CUSTOMAPP_PYTHON_RECOMMENDATION_APM_ENABLED`
+- `CUSTOMAPP_JAVA_CHECKOUT_APM_ENABLED`
+- `CUSTOMAPP_RUM_ENABLED`
+- `CUSTOMAPP_RUM_BROWSER_RUNNER_APM_ENABLED`
+
+Voorbeeld: alleen PHP en Node monitoren, Python en Java uit:
+
+```bash
+CUSTOMAPP_PYTHON_RECOMMENDATION_APM_ENABLED=false \
+CUSTOMAPP_JAVA_CHECKOUT_APM_ENABLED=false \
+docker compose up --build
+```
+
+Als je `CUSTOMAPP_APM_PROFILE` niet zet, labelt elke service zichzelf automatisch als `with-apm` of `without-apm` op basis van zijn eigen toggle. Voor herkenbare meetruns kun je nog steeds `CUSTOMAPP_MEASUREMENT_RUN` gebruiken:
+
+```bash
+CUSTOMAPP_MEASUREMENT_RUN=node-off \
+CUSTOMAPP_NODE_CATALOG_APM_ENABLED=false \
+docker compose up --build
+```
+
+Let op: deze toggles zetten vooral de app-telemetrie uit, dus traces, app-metrics en RUM. De services blijven gewoon draaien. Container-metrics uit `cAdvisor` en structured logs via de collector blijven beschikbaar, zodat je resourcegebruik en foutlogs nog kunt vergelijken. Als "uit" ook echt geen logs of container-metrics in OpenObserve mag betekenen, voeg dan extra filters toe in [`otel-collector-config.yaml`](/Users/dylan/CustomApp/otel-collector-config.yaml) op `service.name` of `container_label_com_docker_compose_service`.
+
 ## Starten
 
 ```bash
@@ -165,8 +206,8 @@ De runner schaalt nu ook terug naar nul als Locust niet actief is of `user_count
 
 Voor de requirement "De APM-oplossing moet inzicht bieden in de impact van monitoring op resourcegebruik van de applicatie" kun je nu twee meetruns uitvoeren met dezelfde load:
 
-- zonder APM: `CUSTOMAPP_MEASUREMENT_RUN=baseline-no-apm CUSTOMAPP_APM_ENABLED=false CUSTOMAPP_APM_PROFILE=without-apm docker compose up --build`
-- met APM: `CUSTOMAPP_MEASUREMENT_RUN=apm-on CUSTOMAPP_APM_ENABLED=true CUSTOMAPP_APM_PROFILE=with-apm docker compose up --build`
+- zonder APM: `CUSTOMAPP_MEASUREMENT_RUN=baseline-no-apm CUSTOMAPP_APM_ENABLED=false docker compose up --build`
+- met APM: `CUSTOMAPP_MEASUREMENT_RUN=apm-on CUSTOMAPP_APM_ENABLED=true docker compose up --build`
 
 Bij de run zonder APM worden app-traces, app-metrics en RUM bewust niet verstuurd. De vergelijking in Grafana gebeurt daarom via onafhankelijke container-metrics uit `cAdvisor`, die door de OpenTelemetry Collector naar `poc-metrics` worden gestuurd.
 
