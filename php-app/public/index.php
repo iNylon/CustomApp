@@ -2434,13 +2434,17 @@ function renderIndex(): string
         message: 'Manual RUM test error scheduled',
       });
 
+      if (typeof window.__triggerOpenObserveRumTestError === 'function') {
+        window.__triggerOpenObserveRumTestError();
+      } else {
+        appendLog('rum:error-trigger-failed', {
+          reason: 'browser-sdk-not-ready',
+        });
+      }
+
       setTimeout(() => {
         button.disabled = false;
         button.innerHTML = original;
-
-        const error = new Error('Manual RUM test error from storefront button');
-        error.name = 'ManualRumTestError';
-        throw error;
       }, 25);
     }
 

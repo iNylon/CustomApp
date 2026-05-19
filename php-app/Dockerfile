@@ -34,6 +34,7 @@ WORKDIR /app
 COPY public /app/public
 COPY src /app/src
 COPY --from=frontend-builder /frontend/public/assets /app/public/assets
+RUN find /app/public/assets -type f -name '*.map' -delete
 
 EXPOSE 8080
 

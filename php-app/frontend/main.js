@@ -88,6 +88,14 @@ if (!hasRequiredConfig) {
     service: options.service,
   });
 
+  window.__triggerOpenObserveRumTestError = () => {
+    setTimeout(() => {
+      const error = new Error('Manual RUM test error from storefront button');
+      error.name = 'ManualRumTestError';
+      throw error;
+    }, 25);
+  };
+
   window.__OPENOBSERVE_RUM_STATE__ = {
     initialized: true,
     service: options.service,

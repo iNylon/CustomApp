@@ -195,7 +195,7 @@
   });
 
   // node_modules/@openobserve/browser-core/esm/tools/timer.js
-  function setTimeout(callback, delay) {
+  function setTimeout2(callback, delay) {
     return getZoneJsOriginalValue(getGlobalObject(), "setTimeout")(monitor(callback), delay);
   }
   function clearTimeout(timeoutId) {
@@ -410,7 +410,7 @@
           pendingExecutionWithParameters = parameters;
         }
         inWaitPeriod = true;
-        pendingTimeoutId = setTimeout(() => {
+        pendingTimeoutId = setTimeout2(() => {
           if (needTrailingExecution && pendingExecutionWithParameters) {
             fn(...pendingExecutionWithParameters);
           }
@@ -1012,7 +1012,7 @@
     next(sessionStoreStrategy);
   }
   function retryLater(operations, sessionStore, currentNumberOfRetries) {
-    setTimeout(() => {
+    setTimeout2(() => {
       processSessionStoreOperations(operations, sessionStore, currentNumberOfRetries + 1);
     }, LOCK_RETRY_DELAY);
   }
@@ -1874,7 +1874,7 @@
     }
     const stoppedInstrumentation = noop;
     let instrumentation = (target, value) => {
-      setTimeout(() => {
+      setTimeout2(() => {
         if (instrumentation !== stoppedInstrumentation) {
           after(target, value);
         }
@@ -2627,7 +2627,7 @@
     if (state2.transportStatus !== 2) {
       return;
     }
-    setTimeout(() => {
+    setTimeout2(() => {
       const payload = state2.queuedPayloads.first();
       send(payload, state2, sendStrategy, requestObservable, {
         onSuccess: () => {
@@ -3061,7 +3061,7 @@ ${upsertMessages}`);
     let durationLimitTimeoutId;
     function scheduleDurationLimitTimeout() {
       if (durationLimitTimeoutId === void 0) {
-        durationLimitTimeoutId = setTimeout(() => {
+        durationLimitTimeoutId = setTimeout2(() => {
           flush("duration_limit");
         }, FLUSH_DURATION_LIMIT);
       }
@@ -3838,7 +3838,7 @@ ${upsertMessages}`);
     return {
       isLimitReached() {
         if (eventCount === 0) {
-          setTimeout(() => {
+          setTimeout2(() => {
             eventCount = 0;
           }, ONE_MINUTE);
         }
@@ -4113,7 +4113,7 @@ ${upsertMessages}`);
   }
   function requestIdleCallbackShim(callback) {
     const start = dateNow();
-    const timeoutId = setTimeout(() => {
+    const timeoutId = setTimeout2(() => {
       callback({
         didTimeout: false,
         timeRemaining: () => Math.max(0, MAX_TASK_TIME - (dateNow() - start))
@@ -6690,7 +6690,7 @@ ${upsertMessages}`);
       let isObserverInitializing = true;
       const observer2 = new PerformanceObserver(monitor((entries) => {
         if (isObserverInitializing) {
-          timeoutId = setTimeout(() => handlePerformanceEntries(entries.getEntries()));
+          timeoutId = setTimeout2(() => handlePerformanceEntries(entries.getEntries()));
         } else {
           handlePerformanceEntries(entries.getEntries());
         }
@@ -6706,7 +6706,7 @@ ${upsertMessages}`);
         ];
         if (fallbackSupportedEntryTypes.includes(options.type)) {
           if (options.buffered) {
-            timeoutId = setTimeout(() => handlePerformanceEntries(performance.getEntriesByType(options.type)));
+            timeoutId = setTimeout2(() => handlePerformanceEntries(performance.getEntriesByType(options.type)));
           }
           try {
             observer2.observe({ entryTypes: [options.type] });
@@ -6822,14 +6822,14 @@ ${upsertMessages}`);
   function doWaitPageActivityEnd(pageActivityObservable, pageActivityEndCallback, maxDuration) {
     let pageActivityEndTimeoutId;
     let hasCompleted = false;
-    const validationTimeoutId = setTimeout(monitor(() => complete({ hadActivity: false })), PAGE_ACTIVITY_VALIDATION_DELAY);
-    const maxDurationTimeoutId = maxDuration !== void 0 ? setTimeout(monitor(() => complete({ hadActivity: true, end: timeStampNow() })), maxDuration) : void 0;
+    const validationTimeoutId = setTimeout2(monitor(() => complete({ hadActivity: false })), PAGE_ACTIVITY_VALIDATION_DELAY);
+    const maxDurationTimeoutId = maxDuration !== void 0 ? setTimeout2(monitor(() => complete({ hadActivity: true, end: timeStampNow() })), maxDuration) : void 0;
     const pageActivitySubscription = pageActivityObservable.subscribe(({ isBusy }) => {
       clearTimeout(validationTimeoutId);
       clearTimeout(pageActivityEndTimeoutId);
       const lastChangeTime = timeStampNow();
       if (!isBusy) {
-        pageActivityEndTimeoutId = setTimeout(monitor(() => complete({ hadActivity: true, end: lastChangeTime })), PAGE_ACTIVITY_END_DELAY);
+        pageActivityEndTimeoutId = setTimeout2(monitor(() => complete({ hadActivity: true, end: lastChangeTime })), PAGE_ACTIVITY_END_DELAY);
       }
     });
     const stop = () => {
@@ -7313,7 +7313,7 @@ ${upsertMessages}`);
       click.stopObservable.subscribe(tryFinalize);
       bufferedClicks.push(click);
       clearTimeout(maxDurationBetweenClicksTimeoutId);
-      maxDurationBetweenClicksTimeoutId = setTimeout(dontAcceptMoreClick, MAX_DURATION_BETWEEN_CLICKS);
+      maxDurationBetweenClicksTimeoutId = setTimeout2(dontAcceptMoreClick, MAX_DURATION_BETWEEN_CLICKS);
     }
     function tryFinalize() {
       if (status === 1 && bufferedClicks.every((click) => click.isStopped())) {
@@ -8646,7 +8646,7 @@ ${upsertMessages}`);
   function waitAfterLoadEvent(configuration, callback) {
     let timeoutId;
     const { stop: stopOnReadyState } = runOnReadyState(configuration, "complete", () => {
-      timeoutId = setTimeout(() => callback());
+      timeoutId = setTimeout2(() => callback());
     });
     return {
       stop: () => {
@@ -9528,7 +9528,7 @@ ${upsertMessages}`);
         stopCommonViewMetricsTracking();
         pageMayExitSubscription.unsubscribe();
         triggerViewUpdate();
-        setTimeout(() => {
+        setTimeout2(() => {
           this.stop();
         }, KEEP_TRACKING_AFTER_VIEW_DELAY);
       },
@@ -12855,7 +12855,7 @@ ${upsertMessages}`);
           state2 = {
             status: 1,
             segment: createSegment({ encoder, context, creationReason: state2.nextSegmentCreationReason }),
-            expirationTimeoutId: setTimeout(() => {
+            expirationTimeoutId: setTimeout2(() => {
               flushSegment("segment_duration_limit");
             }, SEGMENT_DURATION_LIMIT)
           };
@@ -13274,7 +13274,7 @@ ${upsertMessages}`);
         state: "running",
         startClocks: clocksNow(),
         profiler,
-        timeoutId: setTimeout(startNextProfilerInstance, profilerConfiguration.collectIntervalMs),
+        timeoutId: setTimeout2(startNextProfilerInstance, profilerConfiguration.collectIntervalMs),
         longTasks: [],
         views: [],
         cleanupTasks: cleanupTasks2,
@@ -13573,7 +13573,7 @@ ${upsertMessages}`);
         }
       });
       worker.postMessage({ action: "init" });
-      setTimeout(() => onTimeout(source), INITIALIZATION_TIME_OUT_DELAY);
+      setTimeout2(() => onTimeout(source), INITIALIZATION_TIME_OUT_DELAY);
       const stop = () => {
         removeErrorListener();
         removeMessageListener();
@@ -14916,6 +14916,13 @@ ${upsertMessages}`);
       applicationId: options.applicationId,
       service: options.service
     });
+    window.__triggerOpenObserveRumTestError = () => {
+      setTimeout(() => {
+        const error = new Error("Manual RUM test error from storefront button");
+        error.name = "ManualRumTestError";
+        throw error;
+      }, 25);
+    };
     window.__OPENOBSERVE_RUM_STATE__ = {
       initialized: true,
       service: options.service,
