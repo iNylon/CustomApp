@@ -2,11 +2,12 @@ FROM node:22-alpine AS frontend-builder
 
 WORKDIR /frontend
 
-COPY package.json /frontend/package.json
+COPY package.json package-lock.json /frontend/
 COPY frontend /frontend/frontend
 
-RUN npm install --no-fund --no-audit
+RUN npm ci --no-fund --no-audit
 RUN npm run build
+RUN find /frontend/public/assets -type f -name '*.map' -delete
 
 FROM php:8.3-cli
 

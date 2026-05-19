@@ -246,9 +246,9 @@ Voorbeelden in de code:
 - Python recommendation child spans voor PostgreSQL-queries en Redis-cacheacties in [app.py](/Users/dylan/CustomApp/python-service/app.py)
 - Java checkout child spans voor Redis-acties in [App.java](/Users/dylan/CustomApp/java-service/src/main/java/nl/dylan/openobserve/App.java)
 
-## RUM later inschakelen
+## RUM inschakelen
 
-De PHP-frontend bevat al een RUM-ready config endpoint. Zet later in `docker-compose.yml` bijvoorbeeld:
+De PHP-frontend bevat een RUM-config endpoint. Zet in `docker-compose.yml` bijvoorbeeld:
 
 ```yaml
 APP_ENABLE_RUM: "true"
@@ -263,7 +263,40 @@ APP_RUM_API_VERSION: "v1"
 APP_RUM_INSECURE_HTTP: "false"
 ```
 
-De frontend exposeert deze waarden via `/rum-config.js`, zodat je later eenvoudig de OpenObserve browser SDK kunt toevoegen.
+De frontend exposeert deze waarden via `/rum-config.js` en gebruikt ze voor `@openobserve/browser-rum` en `@openobserve/browser-logs`.
+
+## RUM source maps uploaden
+
+OpenObserve matcht source maps op exact dezelfde `service`, `version` en `env` als de RUM SDK meestuurt. Voor deze compose-config zijn dat:
+
+```text
+service: php-storefront-web
+version: 0.0.1
+env: poc
+```
+
+Maak de zip voor OpenObserve:
+
+```bash
+cd php-app
+npm ci
+npm run rum:sourcemaps
+```
+
+Dit maakt `php-app/rum-sourcemaps.zip` met `app.js` en `app.js.map`. Upload die in OpenObserve via `RUM -> Source Maps -> Upload Source Maps` met bovenstaande waarden.
+
+Uploaden via de API kan ook:
+
+```bash
+curl -X POST "https://openobserve.dylanp.nl/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea/sourcemaps" \
+  -H "Authorization: Bearer $OPENOBSERVE_TOKEN" \
+  -F "service=php-storefront-web" \
+  -F "version=0.0.1" \
+  -F "env=poc" \
+  -F "file=@php-app/rum-sourcemaps.zip"
+```
+
+De Docker-image verwijdert `.map` bestanden na de frontend-build, zodat de sourcemaps wel naar OpenObserve geupload kunnen worden maar niet door de PHP-app worden geserveerd.
 
 ## O2 verificatie (trace, logs, infra)
 
