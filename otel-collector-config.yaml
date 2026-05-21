@@ -42,25 +42,41 @@ processors:
     check_interval: 1s
     limit_mib: 512
 
-  # Traces:
-  # - Zet sampling_percentage op 100 voor maximale trace-intensiteit.
-  # - Verlaag naar bijvoorbeeld 25 of 10 om trace-volume centraal terug te brengen.
   probabilistic_sampler/traces:
     sampling_percentage: 100
 
-  # Logs:
-  # - Laat deze lijst leeg om alle logs door te laten.
-  # - Voeg regels toe om lagere severities of specifieke services te droppen.
   filter/logs:
     error_mode: ignore
     logs:
       log_record: []
 
-  # Metrics:
-  # - Gebruik metric-regels om ruisende metrics centraal te droppen.
-  # - Voorbeeld voor lichtere monitoring:
-  #   - 'name == "python_process_cpu_percent"'
-  #   - 'name == "node_process_heap_used_mb"'
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          # Vul service op basis van mogelijke bestaande velden.
+          - set(attributes["service"], attributes["service.name"]) where attributes["service"] == nil and attributes["service.name"] != nil
+          - set(attributes["service"], attributes["service_name"]) where attributes["service"] == nil and attributes["service_name"] != nil
+          - set(attributes["service"], resource.attributes["service.name"]) where attributes["service"] == nil and resource.attributes["service.name"] != nil
+          - set(attributes["service"], resource.attributes["service_name"]) where attributes["service"] == nil and resource.attributes["service_name"] != nil
+
+          # Vul service_name op basis van mogelijke bestaande velden.
+          - set(attributes["service_name"], attributes["service.name"]) where attributes["service_name"] == nil and attributes["service.name"] != nil
+          - set(attributes["service_name"], attributes["service"]) where attributes["service_name"] == nil and attributes["service"] != nil
+          - set(attributes["service_name"], resource.attributes["service.name"]) where attributes["service_name"] == nil and resource.attributes["service.name"] != nil
+          - set(attributes["service_name"], resource.attributes["service"]) where attributes["service_name"] == nil and resource.attributes["service"] != nil
+
+  transform/traces:
+    error_mode: ignore
+    trace_statements:
+      - context: resource
+        statements:
+          # Zorg dat traces zowel service als service_name als resource attributes hebben.
+          - set(attributes["service"], attributes["service.name"]) where attributes["service"] == nil and attributes["service.name"] != nil
+          - set(attributes["service_name"], attributes["service.name"]) where attributes["service_name"] == nil and attributes["service.name"] != nil
+          - set(attributes["service_name"], attributes["service"]) where attributes["service_name"] == nil and attributes["service"] != nil
+
   filter/metrics:
     error_mode: ignore
     metrics:
@@ -92,7 +108,7 @@ exporters:
     endpoint: http://o2-relay/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
     headers:
       Authorization: Basic a2xhbnRAa2xhbnQubmw6WVJ6YmlJSXVuMndIeUJYWQ==
-      stream-name: poc-traces
+      stream-name: poc_traces_v2
     retry_on_failure:
       enabled: true
       initial_interval: 1s
@@ -108,7 +124,7 @@ exporters:
     endpoint: http://o2-relay/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
     headers:
       Authorization: Basic a2xhbnRAa2xhbnQubmw6WVJ6YmlJSXVuMndIeUJYWQ==
-      stream-name: poc-metrics
+      stream-name: poc_metrics_v2
     retry_on_failure:
       enabled: true
       initial_interval: 1s
@@ -124,7 +140,7 @@ exporters:
     endpoint: http://o2-relay/api/3BTUvLGWaJI6cc5tC2JGlZTW1ea
     headers:
       Authorization: Basic a2xhbnRAa2xhbnQubmw6WVJ6YmlJSXVuMndIeUJYWQ==
-      stream-name: poc-logs
+      stream-name: poc_logs_v2
     retry_on_failure:
       enabled: true
       initial_interval: 1s
@@ -138,6 +154,7 @@ exporters:
 
 extensions:
   health_check:
+
   file_storage:
     directory: /var/lib/otelcol/file_storage
 
@@ -147,9 +164,11 @@ service:
       address: 0.0.0.0:8888
     logs:
       level: info
+
   extensions:
     - health_check
     - file_storage
+
   pipelines:
     traces:
       receivers:
@@ -158,6 +177,7 @@ service:
         - memory_limiter
         - probabilistic_sampler/traces
         - resource/common
+        - transform/traces
         - batch/traces
       exporters:
         - otlphttp/openobserve_traces
@@ -183,6 +203,7 @@ service:
         - memory_limiter
         - filter/logs
         - resource/common
+        - transform/logs
         - batch/logs
       exporters:
         - otlphttp/openobserve_logs
